@@ -5,6 +5,9 @@ import serial
 from adafruit_pn532.uart import PN532_UART
 from token_security import TokenSecurity
 
+# Centralized Port Configuration
+DEFAULT_PORT = "COM4"
+
 START_PAGE = 4
 TOTAL_PAGES = 9  # Pages 4 to 12
 
@@ -12,7 +15,7 @@ TOTAL_PAGES = 9  # Pages 4 to 12
 class NFCWorker(threading.Thread):
     def __init__(
         self,
-        port: str,
+        port: str = DEFAULT_PORT,
         baudrate: int = 115200,
         on_tag_detected: Optional[Callable[[str, bool, Optional[str], str], None]] = None,
         on_tag_removed: Optional[Callable[[], None]] = None,

@@ -32,10 +32,7 @@ from PyQt6.QtWidgets import (
 import database
 from nfc_worker import NFCWorker
 
-
-DEFAULT_PORT = "COM5"
 STALL_IDENTIFIER = "STALL-01"
-
 
 APP_STYLE = """
 QMainWindow, QWidget#root {
@@ -182,9 +179,7 @@ class ReceiptDialog(QDialog):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
-        subtitle = QLabel(
-            f"Order #{receipt['order_id']}  •  {receipt['stall_name']}"
-        )
+        subtitle = QLabel(f"Order #{receipt['order_id']}  •  {receipt['stall_name']}")
         subtitle.setObjectName("helperText")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle)
@@ -262,8 +257,8 @@ class StallPOSApp(QMainWindow):
         self._refresh_cart()
         self._refresh_recent_sales()
 
+        # Port configuration is managed centrally by NFCWorker
         self.nfc_worker = NFCWorker(
-            port=DEFAULT_PORT,
             on_tag_detected=self.nfc_bridge.emit_tag,
             on_tag_removed=self.nfc_bridge.emit_removal,
         )
@@ -923,9 +918,7 @@ class StallPOSApp(QMainWindow):
             return
         self.cart[product_id]["note"] = self.note_input.text().strip()
         self._refresh_cart(select_product_id=product_id)
-        self._set_payment_status(
-            f"Note saved for {self.cart[product_id]['name']}.", "success"
-        )
+        self._set_payment_status(f"Note saved for {self.cart[product_id]['name']}.", "success")
 
     def _clear_order(self) -> None:
         if not self.cart:
@@ -990,9 +983,7 @@ class StallPOSApp(QMainWindow):
 
         if not is_valid or not token_uuid:
             self.pay_button.setEnabled(bool(self.cart))
-            self._set_payment_status(
-                f"Card Rejected\n{self._friendly_status(status)}", "error"
-            )
+            self._set_payment_status(f"Card Rejected\n{self._friendly_status(status)}", "error")
             return
 
         success, message, balance, order_id, total = database.process_order_payment(
@@ -1020,8 +1011,7 @@ class StallPOSApp(QMainWindow):
 
         receipt = database.get_order_receipt(int(order_id)) if order_id else None
         self._set_payment_status(
-            f"Payment Successful\nPaid ฿{total:,.2f}\n"
-            f"Remaining balance ฿{balance:,.2f}",
+            f"Payment Successful\nPaid ฿{total:,.2f}\nRemaining balance ฿{balance:,.2f}",
             "success",
         )
         self.cart.clear()
@@ -1039,36 +1029,26 @@ class StallPOSApp(QMainWindow):
         self.balance_uid_label.setText(f"UID: {uid}")
         if not is_valid or not token_uuid:
             self.balance_value.setText("—")
-            self.balance_card_status.setText(
-                f"Card Rejected — {self._friendly_status(status)}"
-            )
-            self.balance_card_status.setStyleSheet(
-                "font-size:25px;font-weight:750;color:#B42318;"
-            )
+            self.balance_card_status.setText(f"Card Rejected — {self._friendly_status(status)}")
+            self.balance_card_status.setStyleSheet("font-size:25px;font-weight:750;color:#B42318;")
             return
 
         wallet = database.get_wallet_by_token(token_uuid)
         if wallet is None:
             self.balance_value.setText("—")
             self.balance_card_status.setText("Card is not registered")
-            self.balance_card_status.setStyleSheet(
-                "font-size:25px;font-weight:750;color:#B42318;"
-            )
+            self.balance_card_status.setStyleSheet("font-size:25px;font-weight:750;color:#B42318;")
             return
 
         self.balance_value.setText(f"฿{float(wallet['balance']):,.2f}")
         self.balance_card_status.setText(f"Card Status: {wallet['status']}")
-        self.balance_card_status.setStyleSheet(
-            "font-size:25px;font-weight:750;color:#1E4ED8;"
-        )
+        self.balance_card_status.setStyleSheet("font-size:25px;font-weight:750;color:#1E4ED8;")
 
     @pyqtSlot()
     def _handle_card_removed(self) -> None:
         if self.operation_mode == "BALANCE":
             self.balance_card_status.setText("Card removed — ready for another card")
-            self.balance_card_status.setStyleSheet(
-                "font-size:25px;font-weight:750;color:#1E4ED8;"
-            )
+            self.balance_card_status.setStyleSheet("font-size:25px;font-weight:750;color:#1E4ED8;")
         elif self.operation_mode == "POS" and self.awaiting_payment:
             self._set_payment_status("Card removed. Waiting for a card to pay.", "waiting")
 
@@ -1116,9 +1096,7 @@ class StallPOSApp(QMainWindow):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if column > 0:
-                    item.setTextAlignment(
-                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-                    )
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 self.sales_table.setItem(row_index, column, item)
 
     # ------------------------------------------------------- Menu management
@@ -1153,11 +1131,7 @@ class StallPOSApp(QMainWindow):
         self.selected_management_product_id = int(product_id_item.text())
         products = database.get_products(STALL_IDENTIFIER, include_unavailable=True)
         product = next(
-            (
-                item
-                for item in products
-                if int(item["product_id"]) == self.selected_management_product_id
-            ),
+            (item for item in products if int(item["product_id"]) == self.selected_management_product_id),
             None,
         )
         if product is None:
@@ -1166,9 +1140,7 @@ class StallPOSApp(QMainWindow):
         self.category_input.setCurrentText(str(product["category"]))
         self.price_input.setValue(float(product["price"]))
         self.available_check.setChecked(bool(product["is_available"]))
-        self.management_message.setText(
-            f"Editing menu item ID {self.selected_management_product_id}."
-        )
+        self.management_message.setText(f"Editing menu item ID {self.selected_management_product_id}.")
 
     def _read_product_form(self):
         name = self.product_name_input.text().strip()
@@ -1184,9 +1156,7 @@ class StallPOSApp(QMainWindow):
         values = self._read_product_form()
         if values is None:
             return
-        success, message, product_id = database.add_product(
-            STALL_IDENTIFIER, *values
-        )
+        success, message, product_id = database.add_product(STALL_IDENTIFIER, *values)
         if not success:
             self.management_message.setText(self._friendly_status(message))
             return
@@ -1219,16 +1189,13 @@ class StallPOSApp(QMainWindow):
         answer = QMessageBox.question(
             self,
             "Delete or Hide Menu Item",
-            "Remove this item from the sales menu?\n"
-            "If it already appears in a receipt, it will be marked unavailable instead.",
+            "Remove this item from the sales menu?\nIf it already appears in a receipt, it will be marked unavailable instead.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        success, message = database.delete_product(
-            self.selected_management_product_id, STALL_IDENTIFIER
-        )
+        success, message = database.delete_product(self.selected_management_product_id, STALL_IDENTIFIER)
         if success:
             self.management_message.setText(
                 "Menu item hidden because it is used in an order."
@@ -1256,9 +1223,7 @@ class StallPOSApp(QMainWindow):
         self._reload_products()
 
     def _save_stall_name(self) -> None:
-        success, message = database.update_stall_name(
-            STALL_IDENTIFIER, self.stall_name_input.text()
-        )
+        success, message = database.update_stall_name(STALL_IDENTIFIER, self.stall_name_input.text())
         self.management_message.setText(
             "Stall name saved." if success else self._friendly_status(message)
         )
