@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Customer Wallet | Food Court System</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 text-gray-800 font-sans antialiased">
+
+    <div class="max-w-md mx-auto min-h-screen bg-white shadow-xl relative pb-10">
+        
+        <!-- Header Section -->
+        <header class="bg-blue-700 text-white p-6 rounded-b-3xl shadow-md">
+            <h1 class="text-xl font-bold text-center tracking-wide">Food Court Wallet</h1>
+        </header>
+
+        <main class="px-6 -mt-4 relative z-10">
+            
+            {% if error %}
+            <!-- Error State Panel -->
+            <div class="bg-red-50 border-l-4 border-red-500 p-4 mt-8 rounded-md shadow-sm">
+                <div class="flex">
+                    <div class="ml-3">
+                        <h3 class="text-sm font-medium text-red-800">System Verification Failed</h3>
+                        <p class="text-sm text-red-700 mt-1">{{ message }}</p>
+                    </div>
+                </div>
+            </div>
+            {% else %}
+            
+            <!-- Balance Card -->
+            <div class="bg-white rounded-2xl shadow-lg border border-gray-100 p-6 mt-6">
+                <p class="text-sm text-gray-500 font-semibold uppercase tracking-wider mb-1">Current Balance</p>
+                <div class="flex items-baseline">
+                    <span class="text-3xl font-extrabold text-blue-700 mr-1">THB</span>
+                    <span class="text-5xl font-black text-gray-900 tracking-tight">{{ "%.2f"|format(wallet.balance) }}</span>
+                </div>
+                
+                <div class="mt-4 pt-4 border-t border-gray-100 flex justify-between items-center">
+                    <div>
+                        <p class="text-xs text-gray-400">Card Status</p>
+                        <p class="text-sm font-bold {{ 'text-green-600' if wallet.status == 'ACTIVE' else 'text-red-600' }}">
+                            {{ wallet.status }}
+                        </p>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-xs text-gray-400">Card Identifier (UID)</p>
+                        <p class="text-sm font-mono text-gray-700">{{ wallet.card_uid }}</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Transaction History Section -->
+            <div class="mt-8">
+                <h2 class="text-lg font-bold text-gray-900 mb-4 px-1">Recent Transactions</h2>
+                
+                {% if transactions %}
+                <div class="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                    <ul class="divide-y divide-gray-50">
+                        {% for tx in transactions %}
+                        <li class="p-4 hover:bg-gray-50 transition-colors duration-150">
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <p class="text-sm font-bold text-gray-800">
+                                        {{ "Add Money" if tx.action_type == "TOP_UP" else "Payment" if tx.action_type == "PAY" else "Return" }}
+                                    </p>
+                                    <p class="text-xs text-gray-500 mt-0.5">
+                                        {{ tx.timestamp|string|truncate(16, True, '')|replace('T', ' ') }}
+                                        <span class="ml-1 text-gray-400">| {{ tx.terminal_type }}</span>
+                                    </p>
+                                </div>
+                                <div class="text-right">
+                                    <p class="text-base font-black {{ 'text-green-600' if tx.action_type == 'TOP_UP' else 'text-gray-900' }}">
+                                        {{ '+' if tx.action_type == 'TOP_UP' else '-' }}{{ "%.2f"|format(tx.amount) }}
+                                    </p>
+                                </div>
+                            </div>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% else %}
+                <div class="text-center py-10 bg-gray-50 rounded-2xl border border-dashed border-gray-200">
+                    <p class="text-gray-500 text-sm">No transaction records found.</p>
+                </div>
+                {% endif %}
+            </div>
+            
+            {% endif %}
+        </main>
+    </div>
+</body>
+</html>
