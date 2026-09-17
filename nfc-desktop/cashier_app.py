@@ -1213,8 +1213,14 @@ class CashierApp(QMainWindow):
 
     def _update_identity_labels(self) -> None:
         uid = self._active_uid or "—"
-        token = f"{self._active_token_uuid[:12]}..." if self._active_token_uuid else "Not detected"
+        
+        # Removed [12:] to display the full 36-character Token UUID
+        token = self._active_token_uuid if self._active_token_uuid else "Not detected"
         identity_text = f"UID: {uid}     Token: {token}"
+
+        # Print the Token UUID to the terminal for easy copying during web application testing
+        if self._active_token_uuid:
+            print(f"\n[DEBUG] Use this Token for web testing: {self._active_token_uuid}\n")
 
         self.issue_uid.setText(f"UID: {uid}")
         self.top_up_identity.setText(identity_text)
