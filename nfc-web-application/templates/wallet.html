@@ -59,11 +59,59 @@
                 <div class="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
                     <ul class="divide-y divide-gray-50">
                         {% for tx in transactions %}
+                        
+                        {% if tx.action_type == 'PAY' and tx.order_list %}
+                        <!-- Expandable Row for Payments -->
+                        <li class="hover:bg-gray-50 transition-colors duration-150">
+                            <details class="group">
+                                <summary class="p-4 cursor-pointer list-none flex justify-between items-center focus:outline-none [&::-webkit-details-marker]:hidden">
+                                    <div class="flex items-center">
+                                        <!-- Rotating Arrow Icon -->
+                                        <svg class="w-4 h-4 text-gray-400 mr-3 transform transition-transform duration-200 group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path>
+                                        </svg>
+                                        <div>
+                                            <p class="text-sm font-bold text-gray-800">Payment</p>
+                                            <p class="text-xs text-gray-500 mt-0.5">
+                                                {{ tx.timestamp|string|truncate(16, True, '')|replace('T', ' ') }}
+                                                <span class="ml-1 text-gray-400">| {{ tx.terminal_type }}</span>
+                                            </p>
+                                        </div>
+                                    </div>
+                                    <div class="text-right">
+                                        <p class="text-base font-black text-gray-900">
+                                            -{{ "%.2f"|format(tx.amount) }}
+                                        </p>
+                                    </div>
+                                </summary>
+                                
+                                <!-- Dropdown Content (Order Items) -->
+                                <div class="px-4 pb-4 ml-7">
+                                    <div class="bg-gray-50 rounded-xl p-3 border border-gray-100 shadow-inner">
+                                        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-2 border-b border-gray-200 pb-1">Order Details</p>
+                                        <ul class="space-y-1">
+                                            {% for item in tx.order_list %}
+                                            <li class="flex justify-between text-sm">
+                                                <span class="text-gray-600">
+                                                    {{ item.product_name }} 
+                                                    <span class="text-gray-400 text-xs ml-1">x{{ item.quantity }}</span>
+                                                </span>
+                                                <span class="text-gray-800 font-medium">฿{{ "%.2f"|format(item.item_total) }}</span>
+                                            </li>
+                                            {% endfor %}
+                                        </ul>
+                                    </div>
+                                </div>
+                            </details>
+                        </li>
+                        {% else %}
+                        
+                        <!-- Standard Row for Top-up or Return -->
                         <li class="p-4 hover:bg-gray-50 transition-colors duration-150">
-                            <div class="flex justify-between items-center">
+                            <div class="flex justify-between items-center ml-7">
                                 <div>
                                     <p class="text-sm font-bold text-gray-800">
-                                        {{ "Add Money" if tx.action_type == "TOP_UP" else "Payment" if tx.action_type == "PAY" else "Return" }}
+                                        {{ "Add Money" if tx.action_type == "TOP_UP" else "Return" }}
                                     </p>
                                     <p class="text-xs text-gray-500 mt-0.5">
                                         {{ tx.timestamp|string|truncate(16, True, '')|replace('T', ' ') }}
@@ -77,6 +125,8 @@
                                 </div>
                             </div>
                         </li>
+                        {% endif %}
+                        
                         {% endfor %}
                     </ul>
                 </div>

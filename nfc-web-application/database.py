@@ -7,11 +7,11 @@ import psycopg2
 from psycopg2.extras import DictCursor
 from typing import Any, Dict, List, Optional
 
-# Database Configuration (Must match the desktop application)
+# Database Configuration 
 DB_CONFIG = {
     "dbname": "foodcourt_db",
     "user": "postgres",
-    "password": "////",  # Replace with actual password
+    "password": "////",
     "host": "127.0.0.1",
     "port": "5432"
 }
@@ -31,17 +31,37 @@ def get_wallet_by_token(token_uuid: str) -> Optional[Dict[str, Any]]:
             row = cursor.fetchone()
             return dict(row) if row else None
 
-def get_recent_transactions(limit: int = 10, card_uid: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Retrieve recent transactions for a specific card UID."""
+def get_recent_transactions(limit: int = 10, token_uuid: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Retrieve recent transactions and include order details for PAY actions."""
     with get_connection() as conn:
         with conn.cursor(cursor_factory=DictCursor) as cursor:
-            if card_uid:
+            if token_uuid:
                 cursor.execute("""
-                    SELECT transaction_id, terminal_type, action_type, amount, balance_after, timestamp
-                    FROM transaction_ledger
-                    WHERE card_uid = %s
-                    ORDER BY transaction_id DESC
+                    SELECT 
+                        t.transaction_id, 
+                        t.terminal_type, 
+                        t.action_type, 
+                        t.amount, 
+                        t.balance_after, 
+                        t.timestamp,
+                        (
+                            SELECT json_agg(
+                                json_build_object(
+                                    'product_name', oi.product_name,
+                                    'quantity', oi.quantity,
+                                    'item_total', oi.item_total
+                                )
+                            )
+                            FROM orders o
+                            JOIN order_items oi ON o.order_id = oi.order_id
+                            WHERE o.token_uuid = t.token_uuid
+                              AND o.created_at >= t.timestamp - interval '5 seconds'
+                              AND o.created_at <= t.timestamp + interval '5 seconds'
+                        ) AS order_list
+                    FROM transaction_ledger t
+                    WHERE t.token_uuid = %s
+                    ORDER BY t.transaction_id DESC
                     LIMIT %s
-                """, (card_uid, limit))
+                """, (token_uuid, limit))
                 return [dict(row) for row in cursor.fetchall()]
             return []
