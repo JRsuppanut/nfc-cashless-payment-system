@@ -50,9 +50,8 @@ async def check_wallet(request: Request, t: str = None, s: str = None):
     # In a production environment, the HMAC signature (s) should be verified here 
     # using the TokenSecurity logic to prevent URL guessing.
 
-    # 4. Fetch transaction history specific to this card
-    card_uid = wallet["card_uid"]
-    transactions = database.get_recent_transactions(limit=10, card_uid=card_uid)
+    # 4. Fetch transaction history specific to this token session only
+    transactions = database.get_recent_transactions(limit=10, token_uuid=t)
 
     # 5. Render the HTML template with the retrieved data
     return templates.TemplateResponse(
