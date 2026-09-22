@@ -1,1291 +1,2416 @@
-import sys
-from datetime import datetime
-from typing import Optional
+"""Food Court Cashier UI.
 
-from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QColor, QFont
+Replace the project's ``cashier_app.py`` with this entire file.  It uses the
+existing ``database.py``, ``nfc_worker.py`` and ``token_security.py`` files.
+Only card setup writes NFC; top-up and return update PostgreSQL while requiring
+the same physical card to remain on the reader until the commit is confirmed.
+"""
+
+import sys
+import uuid
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+
+from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
-    QApplication,
-    QFrame,
-    QGridLayout,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QLineEdit,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QStackedWidget,
-    QTableWidget,
-    QTableWidgetItem,
-    QVBoxLayout,
-    QWidget,
+    QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QMainWindow, QMessageBox, QPushButton, QDialog, QSizePolicy,
+    QStackedWidget, QTableWidget, QTableWidgetItem, QTextEdit,
+    QVBoxLayout, QWidget, QHeaderView,
 )
+from psycopg2.extras import DictCursor, Json
 
 import database
-from nfc_worker import NFCWorker, DEFAULT_PORT
+from nfc_worker import NFCWorker, DEFAULT_PORT, START_PAGE, TOTAL_PAGES
+from token_security import TokenSecurity
 
 
-CASHIER_STYLE = """
-QMainWindow,
-QWidget#centralWidget {
-    background-color: #F7F8F5;
-}
-
+STYLE = """
 QWidget {
-    color: #14212B;
-    font-family: "Segoe UI", sans-serif;
-    font-size: 15px;
-}
-
-QFrame#headerFrame,
-QFrame#panel {
-    background-color: #FFFFFF;
-    border: 1px solid #DDE5E0;
-    border-radius: 14px;
-}
-
-QFrame#softPanel {
-    background-color: #F3F8F5;
-    border: 1px solid #DDE5E0;
-    border-radius: 14px;
-}
-
-QLabel#appTitle {
-    color: #10212C;
-    font-size: 28px;
-    font-weight: 800;
-}
-
-QLabel#pageTitle {
-    color: #10212C;
-    font-size: 29px;
-    font-weight: 800;
-}
-
-QLabel#sectionTitle {
-    color: #14212B;
-    font-size: 19px;
-    font-weight: 700;
-}
-
-QLabel#mutedText {
-    color: #667682;
-    font-size: 15px;
-}
-
-QLabel#largeStatus {
-    color: #075E48;
-    font-size: 27px;
-    font-weight: 800;
-}
-
-QLabel#balanceValue {
-    color: #087A58;
-    font-size: 55px;
-    font-weight: 800;
-}
-
-QLabel#readerStatus {
-    background-color: #E9F7F0;
-    border: 1px solid #BDE6D2;
-    border-radius: 15px;
-    color: #087A58;
-    font-size: 15px;
-    font-weight: 700;
-    padding: 8px 14px;
-}
-
-QPushButton#navButton {
-    background-color: #FFFFFF;
-    border: 1px solid #D6DFDA;
-    border-radius: 11px;
-    color: #14212B;
-    font-size: 16px;
-    font-weight: 700;
-    min-height: 66px;
-    padding: 7px 12px;
-}
-
-QPushButton#navButton:hover {
-    border-color: #0B8A65;
-    background-color: #F2FAF6;
-}
-
-QPushButton#navButton[selected="true"] {
-    background-color: #087A58;
-    border-color: #087A58;
-    color: #FFFFFF;
-}
-
-QPushButton#primaryButton {
-    background-color: #087A58;
-    border: 1px solid #087A58;
-    border-radius: 9px;
-    color: #FFFFFF;
-    font-size: 17px;
-    font-weight: 700;
-    min-height: 50px;
-    padding: 5px 16px;
-}
-
-QPushButton#primaryButton:hover {
-    background-color: #0A936B;
-}
-
-QPushButton#primaryButton:disabled {
-    background-color: #B9C7C1;
-    border-color: #B9C7C1;
-    color: #F5F7F6;
-}
-
-QPushButton#secondaryButton {
-    background-color: #FFFFFF;
-    border: 1px solid #C9D3CE;
-    border-radius: 9px;
-    color: #26343D;
-    font-size: 16px;
-    font-weight: 700;
-    min-height: 50px;
-    padding: 5px 16px;
-}
-
-QPushButton#secondaryButton:hover {
-    background-color: #F1F5F3;
-}
-
-QPushButton#presetButton {
-    background-color: #F6F8F7;
-    border: 1px solid #D3DDD8;
-    border-radius: 9px;
-    color: #14212B;
-    font-size: 20px;
-    font-weight: 700;
-    min-height: 54px;
-}
-
-QPushButton#presetButton:hover {
-    background-color: #E5F5ED;
-    border-color: #0B8A65;
-    color: #087A58;
-}
-
-QLineEdit#amountInput {
-    background-color: #FFFFFF;
-    border: 2px solid #CBD7D1;
-    border-radius: 10px;
-    color: #10212C;
-    font-size: 31px;
-    font-weight: 800;
-    min-height: 58px;
-    padding: 5px 16px;
-}
-
-QLineEdit#amountInput:focus {
-    border-color: #0B8A65;
-}
-
-QTableWidget {
-    background-color: #FFFFFF;
-    alternate-background-color: #F7F9F8;
-    border: 1px solid #DDE5E0;
-    border-radius: 8px;
-    gridline-color: #E6EBE8;
-    selection-background-color: #DDF2E8;
-    selection-color: #14212B;
+    font-family: 'Tahoma';
     font-size: 14px;
+    color: #192c4c;
 }
-
-QHeaderView::section {
-    background-color: #F0F3F1;
-    color: #33434D;
+QMainWindow, QWidget#root {
+    background: #eff6f4;
+}
+QFrame#panel, QFrame#header, QFrame#footer {
+    background: white;
+    border: 1px solid #dbe5e6;
+    border-radius: 12px;
+}
+QLabel#title {
+    font-size: 23px;
+    font-weight: bold;
+}
+QLabel#section {
+    font-size: 21px;
+    font-weight: bold;
+}
+QLabel#muted {
+    color: #728095;
+    font-size: 13px;
+}
+QLabel#money {
+    font-size: 48px;
+    font-weight: bold;
+    color: #007e64;
+}
+QFrame#hero[tone="blue"] QLabel#money {
+    color: #245fa8;
+}
+QFrame#hero[tone="amber"] QLabel#money {
+    color: #b76b0a;
+}
+QLabel#notice {
+    background: #fff2d5;
+    color: #955900;
+    border: 1px solid #f0d39a;
+    border-radius: 9px;
+    padding: 10px 14px;
+    font-size: 13px;
+}
+QFrame#hero {
+    background: #e4f6ee;
     border: none;
-    border-bottom: 1px solid #DDE5E0;
+    border-radius: 12px;
+}
+QFrame#hero[tone="blue"] {
+    background: #e9f1ff;
+}
+QFrame#hero[tone="amber"] {
+    background: #fff1dc;
+}
+QPushButton {
+    background: white;
+    border: 1px solid #cad8d9;
+    border-radius: 9px;
+    padding: 9px 16px;
+    font-weight: bold;
+}
+QPushButton:hover {
+    background: #ecf6f1;
+    border-color: #009477;
+}
+QPushButton:checked {
+    background: #e0f5eb;
+    border: 2px solid #00856b;
+    color: #007e64;
+}
+QPushButton#mode:checked, QPushButton#primary {
+    background: qlineargradient(
+        x1:0, y1:0, x2:1, y2:1,
+        stop:0 #009477, stop:1 #00715b
+    );
+    color: white;
+    border: 1px solid #00856b;
+}
+QPushButton#primary:hover {
+    background: #006e57;
+}
+QPushButton:disabled, QPushButton#primary:disabled {
+    background: #e5ece9;
+    color: #93a29d;
+    border: 1px solid #dde5e0;
+}
+QPushButton#nav {
+    border: none;
+    border-radius: 0;
+    padding: 8px 20px;
+    background: transparent;
+}
+QPushButton#nav:checked {
+    color: #007e64;
+    border-bottom: 3px solid #00856b;
+}
+QPushButton#technicalButton {
+    background: white;
+    color: #192c4c;
+    border: 1px solid #b8ccca;
+    border-radius: 9px;
+    padding: 9px 15px;
+    font-size: 13px;
+    font-weight: bold;
+}
+QPushButton#technicalButton:hover {
+    background: #e8f5f0;
+    border: 2px solid #00856b;
+    color: #007e64;
+}
+QPushButton#preset {
+    font-size: 21px;
+    padding: 12px;
+}
+QLineEdit {
+    background: white;
+    border: 2px solid #00856b;
+    border-radius: 9px;
+    padding: 8px 14px;
+    font-size: 38px;
+    font-weight: bold;
+}
+QLineEdit:disabled {
+    background: #f1f5f3;
+    color: #93a29d;
+}
+QTextEdit {
+    background: #f5f8f6;
+    border: 1px solid #dce7df;
+    border-radius: 8px;
+    padding: 8px;
+}
+QTableWidget {
+    background: white;
+    border: 1px solid #dbe5e6;
+    gridline-color: #edf2ee;
+    selection-background-color: #e0f2e7;
+    selection-color: #192c4c;
+    alternate-background-color: #f8fbfa;
+}
+QHeaderView::section {
+    background: #e5f3ed;
+    padding: 11px;
+    border: none;
+    font-weight: bold;
+}
+QLabel#notice {
+    min-height: 48px;
+    padding: 12px 18px;
+    border-radius: 10px;
+    font-size: 19px;
+    font-weight: bold;
+}
+QLabel#notice[tone="info"] {
+    background: #e8f2ff; color: #1856a8;
+    border: 1px solid #9fc5ff; border-left: 7px solid #2d6cdf;
+}
+QLabel#notice[tone="warning"] {
+    background: #fff3d8; color: #9a5800;
+    border: 1px solid #efc66f; border-left: 7px solid #f0a500;
+}
+QLabel#notice[tone="success"] {
+    background: #e4f8ec; color: #087845;
+    border: 1px solid #9eddb8; border-left: 7px solid #16a05d;
+}
+QLabel#notice[tone="error"] {
+    background: #fff0ef; color: #bd2922;
+    border: 1px solid #f2aaa5; border-left: 7px solid #dc3730;
+}
+QLabel#filterInfo {
+    min-height: 0;
+    background: #eef8f4;
+    color: #176b58;
+    border: 1px solid #b8dfd2;
+    border-left: 5px solid #159276;
+    border-radius: 7px;
+    padding: 7px 11px;
     font-size: 14px;
-    font-weight: 700;
-    padding: 11px 6px;
+    font-weight: bold;
 }
-
-QMessageBox {
-    background-color: #FFFFFF;
+QLabel#statusReady {
+    background:#e4f8ec; color:#087845; border:1px solid #9eddb8;
+    border-radius:13px; padding:7px 12px; font-weight:bold;
 }
-
-QMessageBox QLabel {
-    color: #14212B;
-    font-size: 15px;
+QLabel#statusWarning {
+    background:#fff3d8; color:#9a5800; border:1px solid #efc66f;
+    border-radius:13px; padding:7px 12px; font-weight:bold;
+}
+QLabel#statusError {
+    background:#fff0ef; color:#bd2922; border:1px solid #f2aaa5;
+    border-radius:13px; padding:7px 12px; font-weight:bold;
+}
+QLabel#cardHeading {
+    color:#087845; font-size:25px; font-weight:bold;
+}
+QLabel#largeValue {
+    color:#087845; font-size:34px; font-weight:bold;
+}
+QPushButton#danger {
+    color:#bd2922; border-color:#ef9b95; background:#fff7f6;
+}
+QPushButton#link {
+    color:#087845; border:2px solid #00856b; background:white;
 }
 """
 
 
-class NFCBridge(QObject):
-    """Event bridge for NFC worker thread and UI thread"""
+def money(value):
+    return f"฿{Decimal(str(value)):,.2f}"
 
-    tag_detected = pyqtSignal(str, bool, object, str)
-    tag_removed = pyqtSignal()
 
-    def emit_tag(
-        self,
-        uid: str,
-        is_valid: bool,
-        token_uuid: Optional[str],
-        status: str,
-    ) -> None:
-        self.tag_detected.emit(
-            uid,
-            is_valid,
-            token_uuid,
-            status,
+def label(text="", name=None):
+    item = QLabel(text)
+    item.setWordWrap(True)
+    if name:
+        item.setObjectName(name)
+    return item
+
+
+def panel():
+    frame = QFrame()
+    frame.setObjectName("panel")
+    layout = QVBoxLayout(frame)
+    layout.setContentsMargins(20, 18, 20, 18)
+    layout.setSpacing(12)
+    return frame, layout
+
+
+def set_banner(widget, tone, text):
+    widget.setProperty("tone", tone)
+    widget.setText(("● " if not str(text).lstrip().startswith("●") else "") + str(text))
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
+
+def set_pill(widget, tone, text):
+    names = {
+        "ready": "statusReady",
+        "warning": "statusWarning",
+        "error": "statusError",
+    }
+    widget.setObjectName(names[tone])
+    widget.setText(text)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
+
+def icon(kind, color, size=36):
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.GlobalColor.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.scale(size / 36, size / 36)
+    painter.setPen(QPen(QColor(color), 2.5))
+
+    if kind == 0:
+        painter.drawRoundedRect(3, 7, 25, 20, 3, 3)
+        painter.drawLine(4, 13, 27, 13)
+        painter.drawLine(29, 23, 29, 33)
+        painter.drawLine(24, 28, 34, 28)
+    elif kind == 1:
+        for y in (24, 18, 12):
+            painter.drawEllipse(4, y, 19, 8)
+        painter.drawEllipse(14, 3, 18, 8)
+        painter.drawLine(14, 7, 14, 16)
+        painter.drawLine(32, 7, 32, 18)
+        painter.drawArc(14, 14, 18, 8, 180 * 16, 180 * 16)
+    elif kind == 2:
+        painter.drawEllipse(4, 3, 22, 22)
+        painter.drawLine(23, 23, 33, 33)
+    else:
+        painter.drawLine(5, 12, 27, 12)
+        painter.drawLine(5, 12, 13, 4)
+        painter.drawLine(5, 12, 13, 20)
+        painter.drawArc(19, 12, 13, 17, -90 * 16, 180 * 16)
+        painter.drawLine(17, 29, 26, 29)
+
+    painter.end()
+    return pixmap
+
+
+class CashierStore:
+    """Cashier-side transactional layer with idempotent writes.
+
+    It deliberately keeps balances in PostgreSQL.  NFC is written only by
+    the card setup workflow; top-up, balance enquiry and card return merely
+    use the signed token read from NFC to address the current wallet cycle.
+    """
+
+    def initialize(self):
+        database.initialize_database()
+        with database.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS cashier_ui_operations (
+                        operation_id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL,
+                        token_uuid TEXT,
+                        card_uid TEXT NOT NULL,
+                        amount NUMERIC(10,2),
+                        state TEXT NOT NULL DEFAULT 'PENDING',
+                        result JSONB,
+                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS cashier_ui_operations_state
+                    ON cashier_ui_operations(state, created_at)
+                """)
+            conn.commit()
+
+    def wallet(self, token):
+        if not token:
+            return None
+        with database.get_connection() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cursor:
+                cursor.execute(
+                    "SELECT * FROM wallets WHERE token_uuid=%s",
+                    (token,),
+                )
+                row = cursor.fetchone()
+                return dict(row) if row else None
+
+    def latest_wallet(self, uid):
+        with database.get_connection() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cursor:
+                cursor.execute("""
+                    SELECT * FROM wallets WHERE card_uid=%s
+                    ORDER BY created_at DESC, updated_at DESC LIMIT 1
+                """, (uid,))
+                row = cursor.fetchone()
+                return dict(row) if row else None
+
+    def begin_issue(self, operation_id, uid, previous_token=None):
+        with database.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    INSERT INTO cashier_ui_operations
+                        (operation_id,kind,token_uuid,card_uid,state)
+                    VALUES(%s,'ISSUE',%s,%s,'PENDING')
+                    ON CONFLICT(operation_id) DO NOTHING
+                """, (operation_id, None, uid))
+            conn.commit()
+
+    def attach_issue_token(self, operation_id, uid, token):
+        with database.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE cashier_ui_operations
+                    SET token_uuid=%s,updated_at=CURRENT_TIMESTAMP
+                    WHERE operation_id=%s AND card_uid=%s
+                      AND kind='ISSUE' AND state='PENDING'
+                """, (token, operation_id, uid))
+                if cursor.rowcount != 1:
+                    raise RuntimeError('ISSUE_OPERATION_NOT_PENDING')
+            conn.commit()
+
+    def finish_issue(self, operation_id, uid, token):
+        with database.get_connection() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cursor:
+                cursor.execute("""
+                    SELECT * FROM cashier_ui_operations
+                    WHERE operation_id=%s FOR UPDATE
+                """, (operation_id,))
+                operation = cursor.fetchone()
+                if not operation:
+                    raise RuntimeError('ISSUE_OPERATION_NOT_FOUND')
+                if operation['state'] == 'DONE':
+                    return dict(operation['result'])
+                if operation['state'] != 'PENDING':
+                    raise RuntimeError('ISSUE_OPERATION_NOT_PENDING')
+                if operation['card_uid'] != uid:
+                    raise RuntimeError('CARD_CHANGED')
+
+                cursor.execute("""
+                    INSERT INTO wallets
+                        (token_uuid,card_uid,balance,status,created_at,updated_at)
+                    VALUES(%s,%s,0,'ACTIVE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+                    ON CONFLICT(token_uuid) DO NOTHING
+                """, (token, uid))
+                cursor.execute("""
+                    SELECT card_uid,balance,status FROM wallets
+                    WHERE token_uuid=%s FOR UPDATE
+                """, (token,))
+                wallet = cursor.fetchone()
+                if (
+                    not wallet or wallet['card_uid'] != uid
+                    or wallet['status'] != 'ACTIVE'
+                    or Decimal(str(wallet['balance'])) != Decimal('0')
+                ):
+                    raise RuntimeError('WALLET_REGISTRATION_FAILED')
+
+                cursor.execute("""
+                    SELECT 1 FROM transaction_ledger
+                    WHERE token_uuid=%s AND action_type='SETUP_CARD'
+                """, (token,))
+                if not cursor.fetchone():
+                    cursor.execute("""
+                        INSERT INTO transaction_ledger
+                            (token_uuid,card_uid,terminal_type,action_type,
+                             amount,balance_after,timestamp)
+                        VALUES(%s,%s,'CASHIER','SETUP_CARD',0,0,CURRENT_TIMESTAMP)
+                    """, (token, uid))
+                result = {
+                    'success': True, 'token': token, 'uid': uid,
+                    'balance': '0.00', 'status': 'ACTIVE',
+                }
+                cursor.execute("""
+                    UPDATE cashier_ui_operations
+                    SET state='DONE',result=%s,token_uuid=%s,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE operation_id=%s
+                """, (Json(result), token, operation_id))
+            conn.commit()
+            return result
+
+    def _financial(self, operation_id, kind, token, uid, amount=None):
+        if kind not in ('TOP_UP', 'RETURN_CARD'):
+            raise ValueError('UNSUPPORTED_OPERATION')
+        requested = Decimal(str(amount or 0)).quantize(Decimal('0.01'))
+        if kind == 'TOP_UP' and requested <= 0:
+            return {'success': False, 'reason': 'INVALID_AMOUNT'}
+
+        with database.get_connection() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cursor:
+                cursor.execute("""
+                    INSERT INTO cashier_ui_operations
+                        (operation_id,kind,token_uuid,card_uid,amount,state)
+                    VALUES(%s,%s,%s,%s,%s,'PENDING')
+                    ON CONFLICT(operation_id) DO NOTHING
+                """, (operation_id, kind, token, uid,
+                       requested if kind == 'TOP_UP' else None))
+                cursor.execute("""
+                    SELECT * FROM cashier_ui_operations
+                    WHERE operation_id=%s FOR UPDATE
+                """, (operation_id,))
+                operation = cursor.fetchone()
+                if not operation:
+                    raise RuntimeError('OPERATION_NOT_FOUND')
+                if (
+                    operation['kind'] != kind
+                    or operation['token_uuid'] != token
+                    or operation['card_uid'] != uid
+                ):
+                    raise RuntimeError('OPERATION_REQUEST_MISMATCH')
+                if kind == 'TOP_UP' and Decimal(str(operation['amount'])) != requested:
+                    raise RuntimeError('OPERATION_AMOUNT_MISMATCH')
+                if operation['state'] == 'DONE':
+                    return dict(operation['result'])
+                if operation['state'] != 'PENDING':
+                    return {'success': False, 'reason': 'OPERATION_CANCELLED'}
+
+                cursor.execute("""
+                    SELECT card_uid,balance,status FROM wallets
+                    WHERE token_uuid=%s FOR UPDATE
+                """, (token,))
+                wallet = cursor.fetchone()
+                if not wallet:
+                    result = {'success': False, 'reason': 'WALLET_NOT_FOUND'}
+                elif wallet['card_uid'] != uid:
+                    result = {'success': False, 'reason': 'CARD_ID_MISMATCH'}
+                elif wallet['status'] != 'ACTIVE':
+                    result = {'success': False, 'reason': 'CARD_NOT_ACTIVE'}
+                else:
+                    before = Decimal(str(wallet['balance'])).quantize(Decimal('0.01'))
+                    if kind == 'TOP_UP':
+                        after = before + requested
+                        if after > Decimal('99999999.99'):
+                            result = {'success': False, 'reason': 'BALANCE_LIMIT'}
+                        else:
+                            cursor.execute("""
+                                UPDATE wallets SET balance=%s,updated_at=CURRENT_TIMESTAMP
+                                WHERE token_uuid=%s
+                            """, (after, token))
+                            cursor.execute("""
+                                INSERT INTO transaction_ledger
+                                    (token_uuid,card_uid,terminal_type,action_type,
+                                     amount,balance_after,timestamp)
+                                VALUES(%s,%s,'CASHIER','TOP_UP',%s,%s,CURRENT_TIMESTAMP)
+                            """, (token, uid, requested, after))
+                            result = {
+                                'success': True, 'reason': 'SUCCESS',
+                                'amount': str(requested), 'before': str(before),
+                                'balance': str(after),
+                            }
+                    else:
+                        refund = before
+                        cursor.execute("""
+                            UPDATE wallets
+                            SET balance=0,status='AVAILABLE',updated_at=CURRENT_TIMESTAMP
+                            WHERE token_uuid=%s
+                        """, (token,))
+                        cursor.execute("""
+                            INSERT INTO transaction_ledger
+                                (token_uuid,card_uid,terminal_type,action_type,
+                                 amount,balance_after,timestamp)
+                            VALUES(%s,%s,'CASHIER','REFUND_RETURN',%s,0,CURRENT_TIMESTAMP)
+                        """, (token, uid, refund))
+                        result = {
+                            'success': True, 'reason': 'SUCCESS',
+                            'amount': str(refund), 'before': str(before),
+                            'balance': '0.00', 'status': 'AVAILABLE',
+                        }
+
+                cursor.execute("""
+                    UPDATE cashier_ui_operations
+                    SET state='DONE',result=%s,updated_at=CURRENT_TIMESTAMP
+                    WHERE operation_id=%s
+                """, (Json(result), operation_id))
+            conn.commit()
+            return result
+
+    def top_up(self, operation_id, token, uid, amount):
+        return self._financial(operation_id, 'TOP_UP', token, uid, amount)
+
+    def return_card(self, operation_id, token, uid):
+        return self._financial(operation_id, 'RETURN_CARD', token, uid)
+
+    def operation(self, operation_id):
+        with database.get_connection() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cursor:
+                cursor.execute(
+                    "SELECT * FROM cashier_ui_operations WHERE operation_id=%s",
+                    (operation_id,),
+                )
+                row = cursor.fetchone()
+                return dict(row) if row else None
+
+    def pending_operations(self):
+        with database.get_connection() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cursor:
+                cursor.execute("""
+                    SELECT * FROM cashier_ui_operations
+                    WHERE state='PENDING' ORDER BY created_at
+                """)
+                return [dict(row) for row in cursor.fetchall()]
+
+    def cancel_operation(self, operation_id, reason):
+        result = {'success': False, 'reason': reason}
+        with database.get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    UPDATE cashier_ui_operations
+                    SET state='CANCELLED',result=%s,updated_at=CURRENT_TIMESTAMP
+                    WHERE operation_id=%s AND state='PENDING'
+                """, (Json(result), operation_id))
+            conn.commit()
+        return result
+
+    def history(self, limit=300, token=None):
+        with database.get_connection() as conn:
+            with conn.cursor(cursor_factory=DictCursor) as cursor:
+                cursor.execute("""
+                    SELECT transaction_id,token_uuid,card_uid,terminal_type,
+                           action_type,amount,balance_after,timestamp,
+                           'COMPLETED' AS operation_status
+                    FROM transaction_ledger
+                    WHERE (%s IS NULL OR token_uuid=%s)
+                    ORDER BY transaction_id DESC LIMIT %s
+                """, (token, token, limit))
+                return [dict(row) for row in cursor.fetchall()]
+
+
+class ModeButton(QPushButton):
+    def __init__(self, index, english, thai=""):
+        super().__init__()
+        self.index = index
+        self.setObjectName("mode")
+        self.setCheckable(True)
+        self.setMinimumHeight(70)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
         )
 
-    def emit_removal(self) -> None:
-        self.tag_removed.emit()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(14, 8, 14, 8)
+
+        self.picture = QLabel()
+        self.picture.setFixedSize(36, 36)
+        row.addWidget(self.picture)
+
+        texts = QVBoxLayout()
+        texts.setSpacing(4)
+
+        self.english = QLabel(english)
+        self.thai = QLabel(thai)
+        texts.addWidget(self.english)
+        if thai:
+            texts.addWidget(self.thai)
+        row.addLayout(texts, 1)
+
+        for child in (self.picture, self.thai, self.english):
+            child.setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents,
+            )
+
+        self.toggled.connect(self._colors)
+        self._colors(False)
+
+    def _colors(self, checked):
+        tone = (
+            "#3571cc", "#00856b", "#3571cc", "#cc7915",
+        )[self.index]
+
+        self.picture.setPixmap(
+            icon(self.index, "white" if checked else tone),
+        )
+        self.english.setStyleSheet(
+            f"color: {'white' if checked else '#192c4c'};"
+            "font-weight: bold; font-size: 15px;"
+        )
+        self.thai.setStyleSheet(
+            f"color: {'#d8f4e9' if checked else '#728095'};"
+            "font-size: 11px;"
+        )
+
+
+class NFCBridge(QObject):
+    tag = pyqtSignal(str, bool, object, str)
+    removed = pyqtSignal()
+
+    def emit_tag(self, uid, valid, token, status):
+        self.tag.emit(uid, valid, token, status)
+
+    def emit_removal(self):
+        self.removed.emit()
+
+
+class Job(QThread):
+    result = pyqtSignal(object)
+    error = pyqtSignal()
+
+    def __init__(self, function, parent=None):
+        super().__init__(parent)
+        self.function = function
+
+    def run(self):
+        try:
+            self.result.emit(self.function())
+        except Exception:
+            # ไม่แสดงข้อความที่อาจมีรหัสผ่านฐานข้อมูล
+            self.error.emit()
+
+
+class CashierNFCWorker(NFCWorker):
+    def provision_expected_card(self, expected_uid):
+        # ใช้รูปแบบ Token เดิม และตรวจว่าบัตรไม่ถูกสลับระหว่างเขียน
+        with self._lock:
+            if not self._pn532:
+                return False, "HARDWARE_NOT_INITIALIZED"
+
+            try:
+                raw_uid = self._pn532.read_passive_target(timeout=0.2)
+                if raw_uid is None:
+                    return False, "CARD_NOT_PRESENT"
+
+                uid = ":".join(f"{b:02X}" for b in raw_uid)
+                if uid != expected_uid:
+                    return False, "CARD_CHANGED"
+
+                payload, token = TokenSecurity.create_token_payload(
+                    bytes(raw_uid),
+                )
+
+                for index, page in enumerate(
+                    range(START_PAGE, START_PAGE + TOTAL_PAGES),
+                ):
+                    chunk = payload[index * 4:index * 4 + 4]
+                    if not self._pn532.ntag2xx_write_block(page, chunk):
+                        return False, "WRITE_FAILED"
+
+                reread_uid = self._pn532.read_passive_target(timeout=0.2)
+                if (
+                    reread_uid is None
+                    or bytes(reread_uid) != bytes(raw_uid)
+                ):
+                    return False, "CARD_CHANGED_AFTER_WRITE"
+
+                reread = self._read_card_pages()
+                if reread is None:
+                    return False, "READBACK_FAILED"
+
+                valid, actual_token, _ = (
+                    TokenSecurity.verify_token_payload(
+                        bytes(raw_uid), reread,
+                    )
+                )
+                if not valid or actual_token != token:
+                    return False, "READBACK_FAILED"
+
+                return True, token
+            except Exception:
+                return False, "PROVISIONING_FAILED"
 
 
 class CashierApp(QMainWindow):
-    MODE_ISSUE = 0
-    MODE_TOP_UP = 1
-    MODE_CHECK = 2
-    MODE_RETURN = 3
+    MODE_ISSUE, MODE_TOPUP, MODE_CHECK, MODE_RETURN = range(4)
+    HISTORY_LIMIT = 200
+    MAX_BALANCE = Decimal("99999999.99")
 
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
+        self.setWindowTitle("NFC Cashier — แคชเชียร์")
+        self.resize(1280, 800)
+        self.setMinimumSize(960, 600)
 
-        self.setWindowTitle("Food Court Cashier")
-        self.resize(1480, 860)
-        self.setMinimumSize(1120, 700)
+        self.mode = self.MODE_ISSUE
+        self.uid = None
+        self.token = None
+        self.valid = False
+        self.card_status = ""
+        self.wallet = None
+        self.checked_uid = None
+        self.pending = None
+        self.blocked_uid = None
+        self.uncertain = False
+        self.busy = False
+        self.db_ready = False
+        self.reader_ready = False
+        self.epoch = 0
+        self.history_epoch = 0
+        self.history_uid = None
+        self.history_token = None
+        self.checked_token = None
+        self.current_operation = None
+        self.operation_request = None
+        self.jobs = set()
+        self.compact = None
+        self.store = CashierStore()
 
-        database.initialize_database()
+        self.bridge = NFCBridge()
+        self.bridge.tag.connect(self._tag_detected)
+        self.bridge.removed.connect(self._tag_removed)
 
-        self._active_uid: Optional[str] = None
-        self._active_token_uuid: Optional[str] = None
-        self._is_card_authenticated = False
-        self._last_card_status = ""
-        self._current_mode = self.MODE_ISSUE
+        self._build_ui()
 
-        self._pending_top_up_amount: Optional[float] = None
-        self._pending_top_up_uid: Optional[str] = None
-        self._pending_top_up_token: Optional[str] = None
-        
-        # State for transaction history filter
-        self._ledger_filter_uid: Optional[str] = None
-
-        self.nfc_bridge = NFCBridge()
-        self.nfc_bridge.tag_detected.connect(self._handle_card_detected)
-        self.nfc_bridge.tag_removed.connect(self._handle_card_removed)
-
-        self._init_ui()
-        self._refresh_ledger()
-
-        # Port configuration is managed centrally by NFCWorker
-        self.nfc_worker = NFCWorker(
-            on_tag_detected=self.nfc_bridge.emit_tag,
-            on_tag_removed=self.nfc_bridge.emit_removal,
+        self.worker = CashierNFCWorker(
+            on_tag_detected=self.bridge.emit_tag,
+            on_tag_removed=self.bridge.emit_removal,
         )
-        self.nfc_worker.start()
+        self.worker.start()
 
-        QTimer.singleShot(
-            1200,
-            self._update_reader_connection_state,
+        self.reader_timer = QTimer(self)
+        self.reader_timer.timeout.connect(self._reader_state)
+        self.reader_timer.start(800)
+
+        self.history_timer = QTimer(self)
+        self.history_timer.timeout.connect(self._auto_history)
+        self.history_timer.start(15000)
+
+        self._initialize_db()
+        self._empty_views()
+
+    def _job(self, function, done, failed):
+        job = Job(function, self)
+        self.jobs.add(job)
+
+        job.result.connect(done)
+        job.error.connect(failed)
+        job.finished.connect(lambda j=job: self.jobs.discard(j))
+        job.finished.connect(job.deleteLater)
+        job.start()
+
+    def _build_ui(self):
+        root = QWidget()
+        root.setObjectName("root")
+        self.setCentralWidget(root)
+
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(18, 14, 18, 14)
+        outer.setSpacing(10)
+
+        header, header_box = panel()
+        header.setObjectName("header")
+        header_box.setContentsMargins(16, 10, 16, 10)
+
+        head = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(icon(0, "#00856b", 40))
+        head.addWidget(logo)
+        head.addWidget(label("Food Court Cashier", "title"))
+        head.addStretch()
+
+        self.reader_label = QLabel("Reader: Connecting…")
+        set_pill(self.reader_label, "warning", "Reader: Connecting…")
+        head.addWidget(self.reader_label)
+
+        self.db_label = QLabel("Database: Connecting…")
+        set_pill(self.db_label, "warning", "Database: Connecting…")
+        head.addWidget(self.db_label)
+
+        terminal = label("CASHIER-01", "section")
+        terminal.setStyleSheet("font-size:16px;")
+        head.addWidget(terminal)
+
+        self.db_retry = QPushButton("เชื่อมต่อใหม่")
+        self.db_retry.clicked.connect(self._initialize_db)
+        self.db_retry.hide()
+        head.addWidget(self.db_retry)
+
+        header_box.addLayout(head)
+        outer.addWidget(header)
+
+        nav = QHBoxLayout()
+        self.operation_nav = QPushButton("Operations • ทำรายการ")
+        self.history_nav = QPushButton("Transaction History • ประวัติธุรกรรม")
+
+        for button in (self.operation_nav, self.history_nav):
+            button.setObjectName("nav")
+            button.setCheckable(True)
+            nav.addWidget(button)
+
+        nav.addStretch()
+        self.details_toggle = QPushButton("รายละเอียดทางเทคนิคของบัตร")
+        self.details_toggle.setObjectName("technicalButton")
+        self.details_toggle.clicked.connect(self._toggle_details)
+        nav.addWidget(self.details_toggle)
+        self.recover_button = QPushButton("ตรวจสอบรายการก่อนหน้า")
+        self.recover_button.setObjectName("danger")
+        self.recover_button.clicked.connect(self._recover_operation)
+        self.recover_button.hide()
+        nav.addWidget(self.recover_button)
+        outer.addLayout(nav)
+
+        self.pages = QStackedWidget()
+        outer.addWidget(self.pages, 1)
+
+        operation = QWidget()
+        body = QVBoxLayout(operation)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(10)
+
+        modes = QHBoxLayout()
+        modes.setSpacing(10)
+        self.mode_buttons = []
+
+        mode_names = (
+            ("Set Up a New Card", "ออกบัตรใหม่ / เปิดใช้บัตรหมุนเวียน"),
+            ("Add Money to Card", "เติมเงินเข้าบัตร"),
+            ("Check Card Balance", "ตรวจสอบยอดเงิน"),
+            ("Return Card and Refund Balance", "คืนบัตรและคืนเงินคงเหลือ"),
         )
-
-    # =========================================================
-    # UI CONSTRUCTION
-    # =========================================================
-
-    def _init_ui(self) -> None:
-        central_widget = QWidget()
-        central_widget.setObjectName("centralWidget")
-        self.setCentralWidget(central_widget)
-
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(22, 18, 22, 20)
-        main_layout.setSpacing(14)
-
-        main_layout.addWidget(self._create_header())
-        main_layout.addLayout(self._create_navigation())
-
-        body_layout = QHBoxLayout()
-        body_layout.setSpacing(16)
-
-        self.page_stack = QStackedWidget()
-        self.page_stack.addWidget(self._create_issue_page())
-        self.page_stack.addWidget(self._create_top_up_page())
-        self.page_stack.addWidget(self._create_check_page())
-        self.page_stack.addWidget(self._create_return_page())
-
-        body_layout.addWidget(self.page_stack, 56)
-        body_layout.addWidget(self._create_ledger_panel(), 44)
-
-        main_layout.addLayout(body_layout, 1)
-        self._switch_mode(self.MODE_ISSUE)
-
-    def _create_header(self) -> QFrame:
-        frame = QFrame()
-        frame.setObjectName("headerFrame")
-
-        layout = QHBoxLayout(frame)
-        layout.setContentsMargins(18, 10, 18, 10)
-
-        title = QLabel("Food Court Cashier")
-        title.setObjectName("appTitle")
-
-        self.reader_status_label = QLabel(
-            f"●  NFC Reader: {DEFAULT_PORT}"
-        )
-        self.reader_status_label.setObjectName("readerStatus")
-
-        terminal_label = QLabel("CASHIER-01")
-        terminal_label.setStyleSheet(
-            "font-size: 16px;"
-            "font-weight: 800;"
-            "padding-left: 14px;"
-        )
-
-        layout.addWidget(title)
-        layout.addStretch()
-        layout.addWidget(self.reader_status_label)
-        layout.addWidget(terminal_label)
-
-        return frame
-
-    def _create_navigation(self) -> QHBoxLayout:
-        layout = QHBoxLayout()
-        layout.setSpacing(10)
-
-        navigation_items = [
-            "Set Up a New Card",
-            "Add Money to Card",
-            "Check Card Balance",
-            "Return Card and Refund Balance",
-        ]
-
-        self.nav_buttons = []
-
-        for index, text in enumerate(navigation_items):
-            button = QPushButton(text)
-            button.setObjectName("navButton")
-            button.setCursor(Qt.CursorShape.PointingHandCursor)
-
+        for index, text in enumerate(mode_names):
+            button = ModeButton(index, *text)
             button.clicked.connect(
-                lambda checked=False, mode=index: self._switch_mode(mode)
+                lambda _, i=index: self._switch_mode(i),
             )
+            modes.addWidget(button, 1)
+            self.mode_buttons.append(button)
 
-            layout.addWidget(button, 1)
-            self.nav_buttons.append(button)
+        body.addLayout(modes)
 
-        return layout
+        self.notice = label("", "notice")
+        set_banner(self.notice, "info", "Ready for a New Card")
+        body.addWidget(self.notice)
 
-    @staticmethod
-    def _create_panel(soft: bool = False) -> tuple[QFrame, QVBoxLayout]:
-        frame = QFrame()
-        frame.setObjectName("softPanel" if soft else "panel")
+        self.mode_stack = QStackedWidget()
+        self.mode_stack.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Ignored,
+        )
+        body.addWidget(self.mode_stack, 1)
 
-        layout = QVBoxLayout(frame)
-        layout.setContentsMargins(18, 16, 18, 16)
-        layout.setSpacing(10)
+        self.action_stack = QStackedWidget()
+        self.action_stack.setFixedHeight(64)
 
-        return frame, layout
+        self._build_issue()
+        self._build_topup()
+        self._build_check()
+        self._build_return()
+        body.addWidget(self.action_stack)
 
-    @staticmethod
-    def _create_page(title: str, subtitle: str) -> tuple[QWidget, QVBoxLayout]:
+        self.details_dialog = QDialog(self)
+        self.details_dialog.setWindowTitle("รายละเอียดทางเทคนิคของบัตร")
+        self.details_dialog.resize(580, 250)
+
+        dialog_box = QVBoxLayout(self.details_dialog)
+        dialog_box.addWidget(label(
+            "Token UUID แสดงเต็มสำหรับทดสอบเว็บ"
+            " • ไม่ใช่ข้อมูลที่ต้องแสดงให้ลูกค้าดู",
+            "muted",
+        ))
+
+        self.details = QTextEdit(self.details_dialog)
+        self.details.setReadOnly(True)
+        dialog_box.addWidget(self.details)
+
+        close = QPushButton("ปิด")
+        close.clicked.connect(self.details_dialog.close)
+        dialog_box.addWidget(close)
+
+        self.pages.addWidget(operation)
+        self._build_history()
+
+        self.operation_nav.clicked.connect(
+            lambda: self._navigate(0),
+        )
+        self.history_nav.clicked.connect(
+            lambda: self._navigate(1),
+        )
+        self.operation_nav.setChecked(True)
+        self.mode_buttons[0].setChecked(True)
+
+    def _action_buttons(self, title, action, hint):
+        frame, box = panel()
+        frame.setObjectName("footer")
+        box.setContentsMargins(16, 6, 16, 6)
+
+        row = QHBoxLayout()
+        row.addWidget(label(hint, "muted"), 1)
+
+        cancel = QPushButton("ยกเลิก")
+        cancel.clicked.connect(self._cancel)
+
+        confirm = QPushButton(title)
+        confirm.setObjectName("primary")
+        confirm.clicked.connect(action)
+        confirm.setEnabled(False)
+
+        cancel.setMinimumHeight(42)
+        confirm.setMinimumHeight(42)
+        row.addWidget(cancel)
+        row.addWidget(confirm)
+        box.addLayout(row)
+
+        self.action_stack.addWidget(frame)
+        return confirm, cancel
+
+    def _hero(self, box, caption, tone="green"):
+        frame, hero = panel()
+        frame.setObjectName("hero")
+        frame.setProperty("tone", tone)
+
+        hero.addStretch()
+
+        title = label(caption, "muted")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero.addWidget(title)
+
+        amount = label("—", "money")
+        amount.setWordWrap(False)
+        amount.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hero.addWidget(amount)
+
+        hero.addStretch()
+        box.addWidget(frame, 1)
+        return amount
+
+    def _single_page(self):
+        frame, box = panel()
+        self.mode_stack.addWidget(frame)
+        return box
+
+    def _build_issue(self):
         page = QWidget()
+        row = QHBoxLayout(page)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(16)
 
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
+        left, box = panel()
+        box.addWidget(label("Set Up a New Card", "section"))
+        box.addWidget(label(
+            "ออกบัตรใหม่หรือเปิดใช้บัตรหมุนเวียนที่รับคืนแล้ว",
+            "muted",
+        ))
+        self.issue_heading = label("Ready for a New Card", "cardHeading")
+        box.addWidget(self.issue_heading)
+        self.issue_card = label("Card ID: —")
+        self.issue_status = label("Card Status: Waiting")
+        self.issue_balance = label("Starting Balance: ฿0.00", "largeValue")
+        box.addWidget(self.issue_card)
+        box.addWidget(self.issue_status)
+        box.addWidget(self.issue_balance)
+        issue_note = label(
+            "บัตรที่รับคืนจะได้รับ Token และรอบการใช้งานใหม่ "
+            "ประวัติของลูกค้ารอบก่อนจะไม่ปะปนกับรอบใหม่",
+            "muted",
+        )
+        box.addWidget(issue_note)
+        box.addStretch()
 
-        title_label = QLabel(title)
-        title_label.setObjectName("pageTitle")
+        right, steps = panel()
+        steps.addWidget(label("Card Setup Summary", "section"))
+        steps.addWidget(label("1  Place card on reader", "cardHeading"))
+        steps.addWidget(label("วางบัตรบนเครื่องอ่าน", "muted"))
+        steps.addWidget(label("2  Review card status", "cardHeading"))
+        steps.addWidget(label("ตรวจสอบว่าเป็นบัตรใหม่หรือบัตรที่รับคืนแล้ว", "muted"))
+        steps.addWidget(label("3  Confirm and keep card in place", "cardHeading"))
+        steps.addWidget(label("วางบัตรไว้จนเขียนและตรวจสอบสำเร็จ", "muted"))
+        steps.addStretch()
 
-        subtitle_label = QLabel(subtitle)
-        subtitle_label.setObjectName("mutedText")
-        subtitle_label.setWordWrap(True)
+        row.addWidget(left, 60)
+        row.addWidget(right, 40)
+        self.mode_stack.addWidget(page)
 
-        layout.addWidget(title_label)
-        layout.addWidget(subtitle_label)
-
-        return page, layout
-
-    # =========================================================
-    # PAGE 1: SET UP CARD
-    # =========================================================
-
-    def _create_issue_page(self) -> QWidget:
-        page, layout = self._create_page(
-            "Set Up a New Card",
-            "Place a new or returned NFC card on the reader, then confirm.",
+        self.issue_confirm, self.issue_cancel = (
+            self._action_buttons(
+                "Confirm and Set Up Card",
+                self._issue,
+                "ยังไม่เขียนข้อมูลลงบัตรจนกดยืนยัน",
+            )
         )
 
-        card_panel, card_layout = self._create_panel(soft=True)
+    def _build_topup(self):
+        page = QWidget()
+        row = QHBoxLayout(page)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(18)
 
-        self.issue_status_title = QLabel("Ready for a New Card")
-        self.issue_status_title.setObjectName("largeStatus")
+        left, box = panel()
+        box.addWidget(label("Add Money to Card", "section"))
+        box.addWidget(label(
+            "เลือกจำนวนเงิน รับเงินสด แล้วแตะบัตร",
+            "muted",
+        ))
 
-        self.issue_status_message = QLabel("Place the card on the NFC reader.")
-        self.issue_status_message.setObjectName("mutedText")
-        self.issue_status_message.setWordWrap(True)
-
-        self.issue_uid = QLabel("UID: —")
-
-        card_layout.addWidget(self.issue_status_title)
-        card_layout.addWidget(self.issue_status_message)
-        card_layout.addWidget(self.issue_uid)
-        layout.addWidget(card_panel)
-
-        data_panel, data_layout = self._create_panel()
-
-        data_title = QLabel("Card and Database Information")
-        data_title.setObjectName("sectionTitle")
-        data_layout.addWidget(data_title)
-
-        data_grid = QGridLayout()
-        data_grid.setHorizontalSpacing(24)
-        data_grid.setVerticalSpacing(9)
-
-        data_rows = [
-            ("On-card system marker", "FCTK"),
-            ("On-card Token UUID", "Generated automatically"),
-            ("On-card Authentication Code", "Generated using HMAC-SHA256"),
-            ("Database starting balance", "฿0.00"),
-        ]
-
-        for row, (name, value) in enumerate(data_rows):
-            name_label = QLabel(name)
-            name_label.setStyleSheet("font-weight: 700; color: #33434D;")
-
-            value_label = QLabel(value)
-            value_label.setObjectName("mutedText")
-
-            data_grid.addWidget(name_label, row, 0)
-            data_grid.addWidget(value_label, row, 1)
-
-        data_grid.setColumnStretch(1, 1)
-        data_layout.addLayout(data_grid)
-        layout.addWidget(data_panel)
-
-        self.btn_provision = QPushButton("Confirm and Set Up Card")
-        self.btn_provision.setObjectName("primaryButton")
-        self.btn_provision.setEnabled(False)
-        self.btn_provision.clicked.connect(self._handle_provision_action)
-
-        layout.addWidget(self.btn_provision)
-        layout.addStretch()
-
-        return page
-
-    # =========================================================
-    # PAGE 2: ADD MONEY
-    # =========================================================
-
-    def _create_top_up_page(self) -> QWidget:
-        page, layout = self._create_page(
-            "Add Money to Card",
-            "Enter an amount or choose a common amount. Then tap the card and confirm the transaction.",
-        )
-
-        amount_panel, amount_layout = self._create_panel()
+        self.amount = QLineEdit("100.00")
+        self.amount.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.amount.setMaxLength(16)
+        self.amount.textChanged.connect(self._amount_changed)
 
         amount_row = QHBoxLayout()
+        amount_row.addWidget(self.amount, 1)
+        amount_row.addWidget(label("THB", "section"))
+        box.addLayout(amount_row)
 
-        amount_label = QLabel("Amount (THB)")
-        amount_label.setObjectName("sectionTitle")
+        grid = QGridLayout()
+        self.preset_buttons = []
 
-        self.amount_input = QLineEdit("100.00")
-        self.amount_input.setObjectName("amountInput")
-        self.amount_input.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.amount_input.setPlaceholderText("Enter amount")
-
-        amount_row.addWidget(amount_label)
-        amount_row.addWidget(self.amount_input, 1)
-        amount_layout.addLayout(amount_row)
-
-        presets_layout = QGridLayout()
-        presets_layout.setSpacing(9)
-
-        preset_amounts = [50, 100, 200, 300, 500, 1000]
-
-        for index, amount in enumerate(preset_amounts):
-            button = QPushButton(f"฿{amount:,}")
-            button.setObjectName("presetButton")
-
+        for index, value in enumerate(
+            (50, 100, 200, 300, 500, 1000),
+        ):
+            button = QPushButton(f"{value:,}")
+            button.setObjectName("preset")
+            button.setCheckable(True)
+            button.setChecked(value == 100)
             button.clicked.connect(
-                lambda checked=False, value=amount: self.amount_input.setText(f"{value:.2f}")
+                lambda _, v=value: self._choose_amount(v),
             )
+            grid.addWidget(button, index // 3, index % 3)
+            self.preset_buttons.append(button)
 
-            presets_layout.addWidget(button, index // 3, index % 3)
+        box.addLayout(grid)
+        box.addWidget(label("เลือกยอดด้านบน หรือพิมพ์จำนวนเงินเอง", "muted"))
+        box.addStretch()
 
-        amount_layout.addLayout(presets_layout)
-        layout.addWidget(amount_panel)
+        self.topup_prepare = QPushButton("Scan card to continue")
+        self.topup_prepare.hide()
 
-        scan_panel, scan_layout = self._create_panel(soft=True)
+        right, summary = panel()
+        summary.addWidget(label("Top Up Summary", "section"))
+        summary.addWidget(label("ตรวจสอบรายละเอียดก่อนยืนยัน", "muted"))
 
-        self.top_up_status_title = QLabel("Ready to Scan")
-        self.top_up_status_title.setObjectName("largeStatus")
+        self.topup_card = label("Card ID: —", "muted")
+        summary.addWidget(self.topup_card)
 
-        self.top_up_status_message = QLabel("Place the card on the NFC reader.")
-        self.top_up_status_message.setObjectName("mutedText")
-        self.top_up_status_message.setWordWrap(True)
+        self.topup_status = label("Card Status: Waiting")
+        summary.addWidget(self.topup_status)
 
-        self.top_up_identity = QLabel("UID: —     Token: Not detected")
-        self.top_up_identity.setObjectName("mutedText")
-        self.top_up_identity.setWordWrap(True)
+        for caption, attribute in (
+            ("Previous Balance", "old_balance"),
+            ("Top Up Amount", "add_balance"),
+        ):
+            line = QHBoxLayout()
+            line.addWidget(label(caption, "muted"), 1)
+            value = label("—", "section")
+            line.addWidget(value)
+            setattr(self, attribute, value)
+            summary.addLayout(line)
 
-        scan_layout.addWidget(self.top_up_status_title)
-        scan_layout.addWidget(self.top_up_status_message)
-        scan_layout.addWidget(self.top_up_identity)
-        layout.addWidget(scan_panel)
-
-        self.btn_confirm_top_up = QPushButton("Confirm Add Money")
-        self.btn_confirm_top_up.setObjectName("primaryButton")
-        self.btn_confirm_top_up.setEnabled(False)
-        self.btn_confirm_top_up.clicked.connect(self._confirm_top_up)
-
-        layout.addWidget(self.btn_confirm_top_up)
-        layout.addStretch()
-
-        self.amount_input.textChanged.connect(self._handle_amount_changed)
-
-        return page
-
-    # =========================================================
-    # PAGE 3: CHECK BALANCE
-    # =========================================================
-
-    def _create_check_page(self) -> QWidget:
-        page, layout = self._create_page(
-            "Check Card Balance",
-            "Tap a card to verify it and display the current balance.",
+        self.new_balance = self._hero(
+            summary, "New Balance",
         )
+        summary.addWidget(label(
+            "รับเงินสดแล้วกดยืนยัน โดยวางบัตรไว้เพื่อยืนยันว่าเป็นใบเดิม\n"
+            "โหมดนี้เปลี่ยนเฉพาะยอดใน Database ไม่ได้เขียน NFC",
+            "muted",
+        ))
 
-        balance_panel, balance_layout = self._create_panel(soft=True)
-
-        balance_title = QLabel("Current Balance")
-        balance_title.setObjectName("sectionTitle")
-        balance_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        self.check_balance_value = QLabel("—")
-        self.check_balance_value.setObjectName("balanceValue")
-        self.check_balance_value.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        balance_layout.addWidget(balance_title)
-        balance_layout.addWidget(self.check_balance_value)
-        layout.addWidget(balance_panel)
-
-        status_panel, status_layout = self._create_panel()
-
-        self.check_status = QLabel("Waiting for Card")
-        self.check_status.setObjectName("largeStatus")
-
-        self.check_message = QLabel("Place the card on the NFC reader.")
-        self.check_message.setObjectName("mutedText")
-        self.check_message.setWordWrap(True)
-
-        self.check_identity = QLabel("UID: —     Token: Not detected")
-        self.check_identity.setObjectName("mutedText")
-        self.check_identity.setWordWrap(True)
-
-        status_layout.addWidget(self.check_status)
-        status_layout.addWidget(self.check_message)
-        status_layout.addWidget(self.check_identity)
-
-        layout.addWidget(status_panel)
-        layout.addStretch()
-
-        return page
-
-    # =========================================================
-    # PAGE 4: RETURN CARD
-    # =========================================================
-
-    def _create_return_page(self) -> QWidget:
-        page, layout = self._create_page(
-            "Return Card and Refund Balance",
-            "Review the remaining balance before returning the card.",
-        )
-
-        values_panel, values_layout = self._create_panel()
-
-        values_grid = QGridLayout()
-        values_grid.setVerticalSpacing(13)
-
-        value_titles = ["Current Balance", "Refund Amount", "Card Status"]
-
-        for row, text in enumerate(value_titles):
-            label = QLabel(text)
-            label.setObjectName("sectionTitle")
-            values_grid.addWidget(label, row, 0)
-
-        self.return_balance_value = QLabel("—")
-        self.return_refund_value = QLabel("—")
-        self.return_card_status = QLabel("Waiting for Card")
-
-        for value_label in [
-            self.return_balance_value,
-            self.return_refund_value,
-            self.return_card_status,
-        ]:
-            value_label.setStyleSheet(
-                "font-size: 24px;"
-                "font-weight: 800;"
-                "color: #087A58;"
-                "padding: 6px;"
+        self.topup_confirm, self.topup_cancel = (
+            self._action_buttons(
+                "รับเงินสดแล้ว • ยืนยันเติมเงิน",
+                self._topup,
+                "วางบัตรไว้จน Database บันทึกรายการสำเร็จ",
             )
-
-        values_grid.addWidget(self.return_balance_value, 0, 1)
-        values_grid.addWidget(self.return_refund_value, 1, 1)
-        values_grid.addWidget(self.return_card_status, 2, 1)
-
-        values_grid.setColumnStretch(1, 1)
-        values_layout.addLayout(values_grid)
-
-        self.return_warning = QLabel(
-            "Tap a card to display the refundable balance. No change will be made until you confirm."
-        )
-        self.return_warning.setWordWrap(True)
-        self.return_warning.setStyleSheet(
-            "background-color: #FFF5E8;"
-            "border: 1px solid #F3C98B;"
-            "border-radius: 8px;"
-            "color: #A54B08;"
-            "font-size: 15px;"
-            "font-weight: 650;"
-            "padding: 12px;"
         )
 
-        values_layout.addWidget(self.return_warning)
+        row.addWidget(left, 55)
+        row.addWidget(right, 45)
+        self.mode_stack.addWidget(page)
 
-        self.return_identity = QLabel("UID: —     Token: Not detected")
-        self.return_identity.setObjectName("mutedText")
-        self.return_identity.setWordWrap(True)
+    def _build_check(self):
+        page = QWidget()
+        row = QHBoxLayout(page)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(18)
 
-        values_layout.addWidget(self.return_identity)
-        layout.addWidget(values_panel)
+        left, box = panel()
+        box.addWidget(label("Check Card Balance", "section"))
+        box.addWidget(label(
+            "แตะบัตรเพื่ออ่านยอดเงินล่าสุดจาก Database",
+            "muted",
+        ))
+        self.check_balance = self._hero(
+            box, "Current Balance", "blue",
+        )
+        self.check_card = label("Card ID: —", "cardHeading")
+        self.check_status = label("Card Status: Waiting")
+        self.check_time = label("", "muted")
+        box.addWidget(self.check_card)
+        box.addWidget(self.check_status)
+        box.addWidget(self.check_time)
 
-        button_layout = QHBoxLayout()
+        right, summary = panel()
+        summary.addWidget(label("Current Card", "section"))
+        summary.addWidget(label(
+            "ยอดที่แสดงเป็นยอดเมื่ออ่านล่าสุด ไม่ได้เปลี่ยนยอดเงินในบัตร",
+            "muted",
+        ))
+        self.check_cycle = label("Usage Cycle: —")
+        summary.addWidget(self.check_cycle)
+        summary.addStretch()
+        self.card_history = QPushButton("View This Card’s History")
+        self.card_history.setObjectName("link")
+        self.card_history.setEnabled(False)
+        self.card_history.clicked.connect(self._checked_history)
+        summary.addWidget(self.card_history)
 
-        self.btn_return = QPushButton("Confirm Refund and Return Card")
-        self.btn_return.setObjectName("primaryButton")
-        self.btn_return.setEnabled(False)
-        self.btn_return.clicked.connect(self._handle_return_action)
+        row.addWidget(left, 60)
+        row.addWidget(right, 40)
+        self.mode_stack.addWidget(page)
 
-        cancel_button = QPushButton("Cancel Return")
-        cancel_button.setObjectName("secondaryButton")
-        cancel_button.clicked.connect(self._clear_return_preview)
+        footer, footer_box = panel()
+        footer.setObjectName("footer")
+        footer_box.setContentsMargins(16, 6, 16, 6)
+        footer_box.addWidget(label(
+            "อ่านสำเร็จแล้วนำบัตรออกได้ • แตะบัตรใบถัดไปเพื่อแทนที่ผลเดิมโดยอัตโนมัติ",
+            "muted",
+        ))
+        self.action_stack.addWidget(footer)
+        self.next_card = QPushButton()
+        self.next_card.hide()
 
-        button_layout.addWidget(self.btn_return, 2)
-        button_layout.addWidget(cancel_button, 1)
+    def _build_return(self):
+        page = QWidget()
+        row = QHBoxLayout(page)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(18)
 
-        layout.addLayout(button_layout)
-        layout.addStretch()
+        left, box = panel()
+        box.addWidget(label("Return Card and Refund Balance", "section"))
+        box.addWidget(label(
+            "ตรวจสอบยอดคงเหลือ คืนเงินสด แล้วรับบัตรกลับมาหมุนเวียน",
+            "muted",
+        ))
+        self.return_card = label("Card ID: —", "cardHeading")
+        box.addWidget(self.return_card)
+        self.return_amount = self._hero(
+            box, "Cash Refund to Customer", "amber",
+        )
+        self.return_status = label("Card Status: Waiting")
+        box.addWidget(self.return_status)
 
-        return page
+        right, summary = panel()
+        summary.addWidget(label("After Confirmation", "section"))
+        summary.addWidget(label("Database Balance", "muted"))
+        self.return_after = label("฿0.00", "largeValue")
+        summary.addWidget(self.return_after)
+        summary.addWidget(label("Usage Cycle Status", "muted"))
+        self.return_after_status = label("AVAILABLE / Ready for reuse", "cardHeading")
+        summary.addWidget(self.return_after_status)
+        summary.addWidget(label(
+            "รายการนี้แก้ยอดและสถานะใน Database เท่านั้น ไม่ได้เขียน NFC\n"
+            "แต่ต้องวางบัตรไว้เพื่อยืนยันว่าเป็นบัตรใบเดิมจนบันทึกสำเร็จ",
+            "muted",
+        ))
+        summary.addStretch()
 
-    # =========================================================
-    # TRANSACTION TABLE
-    # =========================================================
+        row.addWidget(left, 60)
+        row.addWidget(right, 40)
+        self.mode_stack.addWidget(page)
 
-    def _create_ledger_panel(self) -> QFrame:
-        panel, layout = self._create_panel()
-        
-        header_layout = QHBoxLayout()
-        title_layout = QVBoxLayout()
-        title_layout.setSpacing(2)
+        self.return_confirm, self.return_cancel = (
+            self._action_buttons(
+                "ยืนยันคืนบัตร",
+                self._return_card,
+                "คืนเงินคงเหลือในบัตร ไม่ใช่การคืนค่าอาหาร • วางบัตรไว้จนสำเร็จ",
+            )
+        )
 
-        self.ledger_title = QLabel("Recent Transactions")
-        self.ledger_title.setObjectName("pageTitle")
+    def _build_history(self):
+        page, box = panel()
 
-        self.ledger_subtitle = QLabel("Latest cashier and stall transactions")
-        self.ledger_subtitle.setObjectName("mutedText")
+        head = QHBoxLayout()
+        head.addWidget(label("Transaction History", "section"))
+        head.addStretch()
 
-        title_layout.addWidget(self.ledger_title)
-        title_layout.addWidget(self.ledger_subtitle)
-        
-        # Clear filter button
-        self.btn_clear_filter = QPushButton("Show All")
-        self.btn_clear_filter.setObjectName("secondaryButton")
-        self.btn_clear_filter.hide()
-        self.btn_clear_filter.clicked.connect(self._clear_ledger_filter)
+        self.show_all = QPushButton("Back to All Transactions")
+        self.show_all.clicked.connect(self._all_history)
+        head.addWidget(self.show_all)
 
-        header_layout.addLayout(title_layout)
-        header_layout.addStretch()
-        header_layout.addWidget(self.btn_clear_filter)
+        self.history_refresh = QPushButton("รีเฟรช")
+        self.history_refresh.clicked.connect(self._refresh_history)
+        head.addWidget(self.history_refresh)
+        box.addLayout(head)
 
-        layout.addLayout(header_layout)
+        self.history_title = label("รายการทั้งหมด", "section")
+        box.addWidget(self.history_title)
+        self.history_focus = label("", "filterInfo")
+        self.history_focus.hide()
+        box.addWidget(self.history_focus)
+        box.addWidget(label(
+            "ดับเบิลคลิก Card ID เพื่อดูเฉพาะประวัติของบัตรใบนั้น • ไม่ต้องพิมพ์ Card ID",
+            "muted",
+        ))
 
-        self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["Time", "Card ID", "Action", "Amount", "Balance", "Status"])
-
-        self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(48)
-        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels((
+            "วัน / เวลา", "Card ID", "จุดทำรายการ",
+            "รายการ", "จำนวนเงิน", "ยอดคงเหลือ", "สถานะ",
+        ))
+        self.table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers,
+        )
+        self.table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows,
+        )
+        self.table.setSelectionMode(
+            QTableWidget.SelectionMode.SingleSelection,
+        )
         self.table.setAlternatingRowColors(True)
-        self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.table.setShowGrid(False)
-        
-        # Add click event for filtering by UID
-        self.table.cellClicked.connect(self._handle_ledger_click)
+        self.table.verticalHeader().hide()
+        self.table.verticalHeader().setDefaultSectionSize(48)
+        self.table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch,
+        )
+        self.table.cellDoubleClicked.connect(
+            self._history_double_click,
+        )
+        box.addWidget(self.table, 1)
 
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        self.history_message = label("", "muted")
+        box.addWidget(self.history_message)
+        self.pages.addWidget(page)
 
-        layout.addWidget(self.table, 1)
-        return panel
-        
-    def _clear_ledger_filter(self) -> None:
-        self._ledger_filter_uid = None
-        self.ledger_subtitle.setText("Latest cashier and stall transactions")
-        self.btn_clear_filter.hide()
-        self._refresh_ledger()
+    def _toggle_details(self):
+        self._details()
+        self.details_dialog.show()
+        self.details_dialog.raise_()
 
-    def _handle_ledger_click(self, row: int, column: int) -> None:
-        # If clicked on the Card ID column (index 1)
-        if column == 1:
-            item = self.table.item(row, column)
-            if item and item.text() and item.text() != "Unknown":
-                self._ledger_filter_uid = item.text()
-                self.ledger_subtitle.setText(f"Filtered by Card ID: {self._ledger_filter_uid}")
-                self.btn_clear_filter.show()
-                self._refresh_ledger()
+    def _details(self):
+        self.details.setPlainText(
+            f"NFC port: {DEFAULT_PORT}\n"
+            f"Card ID: {self.uid or '—'}\n"
+            f"Token UUID: {self.token or '—'}\n"
+            f"NFC status: {self.card_status or '—'}"
+        )
 
-    def _refresh_ledger(self) -> None:
-        records = database.get_recent_transactions(20, self._ledger_filter_uid)
-        self.table.setRowCount(0)
+    def _initialize_db(self):
+        if self.busy or self.uncertain:
+            return
 
-        action_names = {
-            "TOP_UP": "Add Money",
-            "PAY": "Payment",
-            "REFUND_RETURN": "Card Return",
-        }
+        self.db_ready = False
+        self.db_retry.setEnabled(False)
+        set_pill(self.db_label, "warning", "Database: Connecting…")
+        self._disable_actions()
 
-        for row_index, record in enumerate(records):
-            self.table.insertRow(row_index)
+        def initialize_and_find_pending():
+            self.store.initialize()
+            return self.store.pending_operations()
+
+        def done(pending_operations):
+            self.db_ready = True
+            set_pill(self.db_label, "ready", "Database: Connected")
+            self.db_retry.hide()
+            self.db_retry.setEnabled(True)
+            if pending_operations:
+                pending = dict(pending_operations[0])
+                self.current_operation = pending["operation_id"]
+                kind = pending["kind"]
+                self.operation_request = {
+                    "kind": kind,
+                    "uid": pending["card_uid"],
+                }
+                if kind == "ISSUE":
+                    self.operation_request.update(
+                        old_token=None,
+                        new_token=pending.get("token_uuid"),
+                    )
+                else:
+                    self.operation_request["token"] = pending.get("token_uuid")
+                    if kind == "TOP_UP":
+                        self.operation_request["amount"] = str(pending.get("amount"))
+                self.uncertain = True
+                self.recover_button.show()
+                set_banner(
+                    self.notice,
+                    "error",
+                    f"Unfinished {kind.replace('_', ' ').title()} • พบรายการเดิมที่ยังยืนยันผลไม่ได้ "
+                    "แตะบัตรใบเดิมแล้วกดตรวจสอบรายการก่อนหน้า",
+                )
+                self._disable_actions()
+                self._refresh_history()
+                return
+            self._reload_card()
+            self._refresh_history()
+
+        self._job(
+            initialize_and_find_pending,
+            done,
+            self._db_failed,
+        )
+
+    def _db_failed(self):
+        self.db_ready = False
+        self.pending = None
+        set_pill(self.db_label, "error", "Database: Unavailable")
+        self.db_retry.show()
+        self.db_retry.setEnabled(True)
+        self._disable_actions()
+        set_banner(self.notice, "error",
+            "เชื่อมต่อฐานข้อมูลไม่ได้ ตรวจสอบ PostgreSQL"
+            " แล้วกดเชื่อมต่อฐานข้อมูลใหม่"
+        )
+
+    def _reader_state(self):
+        connection = getattr(self.worker, "_serial_conn", None)
+        ready = bool(
+            self.worker.is_alive()
+            and getattr(self.worker, "_pn532", None)
+            and connection
+            and connection.is_open
+        )
+
+        set_pill(
+            self.reader_label,
+            "ready" if ready else "error",
+            "Reader: Ready" if ready else "Reader: Disconnected",
+        )
+        self.reader_label.setToolTip(
+            f"พอร์ต NFC: {DEFAULT_PORT}"
+            " • ตรวจสอบสายและอุปกรณ์หากไม่พร้อม"
+        )
+        if ready == self.reader_ready:
+            return
+
+        self.reader_ready = ready
+        if not ready:
+            self._tag_removed()
+        elif not self.busy and not self.uncertain:
+            if self.uid:
+                self._reload_card()
+            else:
+                self._idle_notice()
+
+    def _idle_notice(self):
+        if self.uncertain:
+            set_banner(self.notice, "error",
+                "ต้องตรวจสอบผลรายการก่อนทำต่อ"
+                " ดูประวัติและอย่าทำรายการเดิมซ้ำ"
+            )
+        elif not self.db_ready:
+            set_banner(self.notice, "warning", "Waiting for Database • รอฐานข้อมูลพร้อมก่อนทำรายการ")
+        elif not self.reader_ready:
+            set_banner(self.notice, "warning",
+                "NFC Reader Not Ready • ยังทำรายการบัตรไม่ได้ เครื่องอ่านไม่พร้อม"
+                " แต่เปิดดูประวัติได้"
+            )
+        elif self.blocked_uid and self.uid == self.blocked_uid:
+            set_banner(self.notice, "success",
+                "Transaction Completed • นำบัตรออกก่อน แล้วแตะใหม่เพื่อเริ่มรายการถัดไป"
+            )
+        elif self.mode == self.MODE_CHECK:
+            set_banner(self.notice, "info",
+                "Waiting for Card • แตะบัตรเพื่อตรวจสอบยอดเงิน"
+                " • อ่านสำเร็จแล้วนำบัตรออกได้"
+            )
+        elif self.mode == self.MODE_ISSUE:
+            set_banner(self.notice, "info",
+                "Ready for a New Card • แตะบัตรใหม่หรือบัตรหมุนเวียนที่รับคืนแล้ว"
+            )
+        elif self.mode == self.MODE_TOPUP:
+            set_banner(self.notice, "info",
+                "Ready to Add Money • เลือกจำนวนเงิน แล้วแตะบัตรและวางไว้จนรายการสำเร็จ"
+            )
+        else:
+            set_banner(self.notice, "warning",
+                "Ready to Return Card • แตะบัตรและวางไว้บนเครื่องอ่าน"
+                " จนคืนเงิน รับบัตร และบันทึกรายการสำเร็จ"
+            )
+
+    def _disable_actions(self):
+        for button in (
+            self.issue_confirm,
+            self.topup_confirm,
+            self.return_confirm,
+            self.topup_prepare,
+        ):
+            button.setEnabled(False)
+
+    def _empty_views(self, preserve_check=False):
+        self._disable_actions()
+        self.issue_card.setText("Card ID: —")
+        self.issue_heading.setText("Ready for a New Card")
+        self.issue_status.setText("Card Status: Waiting")
+        self.topup_card.setText("Card ID: —")
+        self.topup_status.setText("Card Status: Waiting")
+        self.return_card.setText("Card ID: —")
+
+        for item in (
+            self.old_balance, self.add_balance,
+            self.new_balance, self.return_amount,
+        ):
+            item.setText("—")
+
+        self.return_status.setText("Card Status: Waiting")
+        self.return_confirm.setText("ยืนยันคืนบัตร")
+        self.topup_confirm.setText("รับเงินสดแล้ว • ยืนยันเติมเงิน")
+
+        if not preserve_check:
+            self.checked_uid = None
+            self.checked_token = None
+            self.check_card.setText("Card ID: —")
+            self.check_balance.setText("—")
+            self.check_status.setText("Card Status: Waiting")
+            self.check_cycle.setText("Usage Cycle: —")
+            self.check_time.setText("")
+            self.card_history.setEnabled(False)
+
+        self._details()
+        self._idle_notice()
+
+    def _navigate(self, index):
+        if self.busy:
+            return
+
+        self.pages.setCurrentIndex(index)
+        self.operation_nav.setChecked(index == 0)
+        self.history_nav.setChecked(index == 1)
+
+        if index == 1:
+            self._cancel_pending()
+            self._refresh_history()
+        elif self.uid:
+            self._reload_card()
+        else:
+            self._idle_notice()
+
+    def _switch_mode(self, mode):
+        if self.busy:
+            return
+
+        self.mode = mode
+        self.mode_stack.setCurrentIndex(mode)
+        self.action_stack.setCurrentIndex(mode)
+
+        for index, button in enumerate(self.mode_buttons):
+            button.setChecked(index == mode)
+
+        self._cancel_pending()
+        self._empty_views()
+        self._reload_card()
+
+    def _cancel_pending(self):
+        self.epoch += 1
+        self.pending = None
+        self._disable_actions()
+
+    def _cancel(self):
+        if self.busy or self.uncertain:
+            return
+
+        if self.uid:
+            self.blocked_uid = self.uid
+
+        self._cancel_pending()
+        self._empty_views()
+        self.notice.setText(
+            "ยกเลิกรายการที่ยังไม่ยืนยันแล้ว"
+            " • นำบัตรออกก่อนเริ่มใหม่"
+        )
+
+    def _next_card(self):
+        if self.uid:
+            self.blocked_uid = self.uid
+
+        self._cancel_pending()
+        self._empty_views()
+
+    def _amount_changed(self):
+        for button in self.preset_buttons:
+            try:
+                button.setChecked(
+                    Decimal(self.amount.text())
+                    == Decimal(button.text().replace(",", ""))
+                )
+            except InvalidOperation:
+                button.setChecked(False)
+
+        if self.mode != self.MODE_TOPUP or self.busy:
+            return
+
+        self.pending = None
+        self.topup_confirm.setEnabled(False)
+        if self.wallet and self._can_read():
+            self._display_wallet(self.wallet)
+        else:
+            for item in (self.old_balance, self.add_balance, self.new_balance):
+                item.setText("—")
+            self._idle_notice()
+
+    def _choose_amount(self, value):
+        self.amount.setText(f"{value:.2f}")
+        for button in self.preset_buttons:
+            button.setChecked(
+                button.text().replace(",", "") == str(value),
+            )
+
+    def _can_read(self):
+        return bool(
+            self.uid
+            and self.db_ready
+            and self.reader_ready
+            and not self.busy
+            and not self.uncertain
+            and self.uid != self.blocked_uid
+            and self.pages.currentIndex() == 0
+        )
+
+    def _tag_detected(self, uid, valid, token, status):
+        self.epoch += 1
+        self.uid = uid
+        self.valid = valid
+        self.token = token
+        self.card_status = status
+        self.wallet = None
+        self.pending = None
+
+        if self.busy:
+            self._details()
+            return
+
+        self._empty_views()
+        self._reload_card()
+
+    def _tag_removed(self):
+        self.epoch += 1
+        self.uid = None
+        self.token = None
+        self.valid = False
+        self.card_status = ""
+        self.wallet = None
+        self.pending = None
+        self.blocked_uid = None
+
+        if self.busy:
+            self._details()
+            return
+
+        keep = (
+            self.mode == self.MODE_CHECK
+            and self.checked_uid is not None
+        )
+        self._empty_views(preserve_check=keep)
+
+        if keep and not self.uncertain:
+            set_banner(self.notice, "success",
+                "Card Read Successfully • นำบัตรออกแล้ว"
+                " • ยอดที่แสดงคือยอดเมื่ออ่านล่าสุด"
+                " ไม่ใช่การอ่านแบบสด"
+            )
+
+    def _reload_card(self):
+        self._disable_actions()
+
+        if not self._can_read():
+            self._idle_notice()
+            return
+
+        self.epoch += 1
+        generation = self.epoch
+        self.pending = None
+        self.wallet = None
+
+        uid, token, mode = self.uid, self.token, self.mode
+        self._details()
+
+        for item in (
+            self.issue_card, self.topup_card, self.return_card,
+        ):
+            item.setText(f"Card ID: {uid}")
+
+        if not self.valid or not token:
+            if self.card_status != "FOREIGN_OR_UNINITIALIZED_CARD":
+                self.issue_status.setText("Card Status: Verification Failed")
+                set_banner(self.notice, "error",
+                    "Card Verification Failed • ไม่อนุญาตให้ทำรายการกับบัตรนี้"
+                )
+                return
+
+            set_banner(self.notice, "info", "Checking Card Registration… • กำลังตรวจสอบบัตร")
+
+            def unregistered_done(latest):
+                if generation != self.epoch or not self._can_read():
+                    return
+                if latest and latest.get("status") == "ACTIVE":
+                    self.issue_status.setText("Card Status: Active record found")
+                    set_banner(self.notice, "error",
+                        "Card Data Cannot Be Verified • พบรายการที่ยังใช้งานอยู่ใน Database "
+                        "กรุณาให้ผู้ดูแลตรวจสอบ ห้ามออกบัตรซ้ำ"
+                    )
+                    return
+                if mode == self.MODE_ISSUE:
+                    self.issue_heading.setText("Ready for a New Card")
+                    self.issue_status.setText(
+                        "Card Status: Returned / Ready for setup" if latest
+                        else "Card Status: New / Not registered"
+                    )
+                    self.issue_confirm.setEnabled(True)
+                    set_banner(self.notice, "info",
+                        "Ready for a New Card • ตรวจสอบแล้วกดยืนยัน "
+                        "และวางบัตรไว้จนเขียนข้อมูลสำเร็จ"
+                    )
+                else:
+                    set_banner(self.notice, "error",
+                        "Card Not Registered • บัตรนี้ยังไม่มีรอบการใช้งาน "
+                        "ให้ไปที่ Set Up a New Card ก่อน"
+                    )
+
+            self._job(lambda: self.store.latest_wallet(uid), unregistered_done, failed=lambda: self._db_failed())
+            return
+
+        set_banner(self.notice, "info", "Checking Card… • กำลังตรวจสอบข้อมูลบัตร")
+
+        def done(wallet):
+            if generation != self.epoch or not self._can_read():
+                return
+
+            if wallet and wallet.get("card_uid") != uid:
+                set_banner(self.notice, "error",
+                    "Card ID ไม่ตรงกับข้อมูลบัตรในฐานข้อมูล"
+                    " • ไม่อนุญาตให้ทำรายการ"
+                )
+                return
+
+            if not wallet:
+                set_banner(self.notice, "error",
+                    "Card Record Not Found • Token บนบัตรผ่านการตรวจสอบ "
+                    "แต่ไม่พบใน Database กรุณาให้ผู้ดูแลตรวจสอบ"
+                )
+                return
+
+            self.wallet = wallet
+            self._display_wallet(wallet)
+
+        def failed():
+            if generation == self.epoch:
+                self._db_failed()
+
+        self._job(
+            lambda: self.store.wallet(token),
+            done,
+            failed,
+        )
+
+    def _display_wallet(self, wallet):
+        if self.mode == self.MODE_ISSUE:
+            allowed = not wallet or (
+                wallet.get("status") == "AVAILABLE"
+                and Decimal(str(wallet.get("balance", 0))) == 0
+            )
+            self.issue_confirm.setEnabled(allowed)
+            self.issue_status.setText(
+                "Card Status: Returned / Ready for setup" if allowed
+                else "Card Status: Active"
+            )
+            set_banner(
+                self.notice,
+                "info" if allowed else "error",
+                "Ready for a New Card • วางบัตรไว้จนรายการสำเร็จ"
+                if allowed else
+                "Card Already Active • บัตรนี้ยังใช้งานอยู่ ต้องคืนบัตรก่อนออกบัตรรอบใหม่",
+            )
+            return
+
+        if not wallet:
+            set_banner(self.notice, "error", "Wallet Not Found • ตรวจสอบการออกบัตรก่อน")
+            return
+
+        balance = Decimal(str(wallet.get("balance", 0)))
+        state = wallet.get("status", "")
+        state_text = {
+            "ACTIVE": "ใช้งานได้",
+            "AVAILABLE": "คืนบัตรแล้ว",
+            "SUSPENDED": "ระงับการใช้งาน",
+        }.get(state, state)
+
+        if self.mode == self.MODE_CHECK:
+            self.checked_uid = self.uid
+            self.checked_token = self.token
+            self.check_card.setText(f"Card ID: {self.uid}")
+            self.check_balance.setText(money(balance))
+            self.check_status.setText(f"Card Status: {state_text}")
+            self.check_cycle.setText(f"Usage Cycle: {str(self.token)[:8]}…")
+            self.check_time.setText(
+                f"อ่านล่าสุด {datetime.now():%d/%m/%Y %H:%M:%S}",
+            )
+            self.card_history.setEnabled(True)
+            set_banner(self.notice, "success",
+                "Balance Read Successfully • อ่านยอดเงินแล้ว"
+                " • นำบัตรออกได้ หรือเปิดดูประวัติของบัตรนี้"
+            )
+
+        elif self.mode == self.MODE_RETURN:
+            self.return_amount.setText(money(balance))
+            self.return_status.setText(f"Card Status: {state_text}")
+            self.return_confirm.setText(
+                f"คืนเงินสด {money(balance)} • ยืนยันคืนบัตร"
+            )
+            self.return_confirm.setEnabled(
+                state == "ACTIVE" and balance >= 0,
+            )
+            set_banner(self.notice, "warning" if state == "ACTIVE" else "error",
+                "Review Refund and Confirm • ตรวจสอบยอดคืน แล้วกดยืนยัน"
+                " • วางบัตรไว้จนสำเร็จ"
+                if state == "ACTIVE" else
+                "Card Cannot Be Returned • บัตรนี้ไม่อยู่ในสถานะที่คืนบัตรได้"
+            )
+
+        else:
+            self.old_balance.setText(money(balance))
+            self.topup_status.setText(f"Card Status: {state_text}")
+
+            if state != "ACTIVE":
+                set_banner(self.notice, "error", "Card Cannot Be Topped Up • บัตรนี้ไม่อยู่ในสถานะที่เติมเงินได้")
+                return
 
             try:
-                time_text = datetime.fromisoformat(str(record["timestamp"])).strftime("%H:%M")
-            except (TypeError, ValueError):
-                time_text = str(record["timestamp"])[11:16]
-                
-            card_id_text = str(record.get("card_uid", "Unknown"))
-            action_code = str(record["action_type"])
-            amount = float(record["amount"])
+                amount = self._parse_amount()
+            except ValueError as error:
+                set_banner(self.notice, "error", str(error))
+                return
 
-            if action_code == "TOP_UP":
-                amount_text = f"+฿{amount:,.2f}"
-                amount_color = QColor("#087A58")
-            else:
-                amount_text = f"-฿{amount:,.2f}"
-                amount_color = QColor("#D65A00")
+            if balance + amount > self.MAX_BALANCE:
+                set_banner(self.notice, "error",
+                    "ยอดเงินหลังเติมเกินขนาดที่ฐานข้อมูลรองรับ",
+                )
+                return
 
-            action_text = action_names.get(action_code, action_code.replace("_", " ").title())
-
-            values = [
-                time_text,
-                card_id_text,
-                action_text,
-                amount_text,
-                f"฿{float(record['balance_after']):,.2f}",
-                "Success",
-            ]
-
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-
-                if column == 1:
-                    # Style Card ID to look like a hyperlink
-                    item.setForeground(QColor("#2864E8"))
-                    font = QFont("Segoe UI", 14)
-                    font.setUnderline(True)
-                    item.setFont(font)
-                    item.setToolTip("Click to filter transactions for this card")
-                elif column == 3:
-                    item.setForeground(amount_color)
-                    item.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
-                elif column == 4:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                elif column == 5:
-                    item.setForeground(QColor("#087A58"))
-
-                self.table.setItem(row_index, column, item)
-
-    # =========================================================
-    # NAVIGATION
-    # =========================================================
-
-    def _switch_mode(self, mode: int) -> None:
-        self._current_mode = mode
-        self.page_stack.setCurrentIndex(mode)
-
-        for index, button in enumerate(self.nav_buttons):
-            button.setProperty("selected", index == mode)
-            button.style().unpolish(button)
-            button.style().polish(button)
-
-        if not self._active_uid:
-            return
-
-        if mode == self.MODE_ISSUE:
-            self._prepare_issue_view()
-        elif mode == self.MODE_TOP_UP:
-            self._clear_pending_top_up()
-            self._set_top_up_feedback(
-                "Remove and Tap Again",
-                "The current card has already been read. Remove it and tap it again after selecting the amount.",
-                None,
+            self.add_balance.setText(money(amount))
+            self.new_balance.setText(money(balance + amount))
+            self.topup_confirm.setText(
+                f"รับเงินสด {money(amount)} • ยืนยันเติมเงิน"
             )
-        elif mode == self.MODE_CHECK:
-            self._show_balance()
-        elif mode == self.MODE_RETURN:
-            self._prepare_return_view()
-
-    # =========================================================
-    # NFC CARD EVENTS
-    # =========================================================
-
-    @pyqtSlot(str, bool, object, str)
-    def _handle_card_detected(
-        self,
-        uid: str,
-        is_valid: bool,
-        token_uuid: Optional[str],
-        status: str,
-    ) -> None:
-        self._active_uid = uid
-        self._active_token_uuid = token_uuid
-        self._is_card_authenticated = is_valid
-        self._last_card_status = status
-
-        self._update_identity_labels()
-
-        if self._current_mode == self.MODE_ISSUE:
-            self._prepare_issue_view()
-        elif self._current_mode == self.MODE_TOP_UP:
-            self._prepare_top_up_confirmation()
-        elif self._current_mode == self.MODE_CHECK:
-            self._show_balance()
-        elif self._current_mode == self.MODE_RETURN:
-            self._prepare_return_view()
-
-        self._refresh_ledger()
-
-    @pyqtSlot()
-    def _handle_card_removed(self) -> None:
-        self._active_uid = None
-        self._active_token_uuid = None
-        self._is_card_authenticated = False
-        self._last_card_status = ""
-
-        self._clear_pending_top_up()
-        self._reset_card_views()
-
-    # =========================================================
-    # SET UP CARD
-    # =========================================================
-
-    def _prepare_issue_view(self) -> None:
-        self.issue_uid.setText(f"UID: {self._active_uid or '—'}")
-
-        if not self._active_uid:
-            self.btn_provision.setEnabled(False)
-            return
-
-        if not self._is_card_authenticated:
-            if self._last_card_status == "FOREIGN_OR_UNINITIALIZED_CARD":
-                self.issue_status_title.setText("New Card Detected")
-                self.issue_status_message.setText("Confirm to write a secure food court token.")
-                self.btn_provision.setEnabled(True)
-            else:
-                self.issue_status_title.setText("Card Could Not Be Verified")
-                self.issue_status_message.setText(f"Card error: {self._last_card_status}")
-                self.btn_provision.setEnabled(False)
-            return
-
-        wallet = database.get_wallet_by_token(self._active_token_uuid)
-
-        if wallet is None or wallet["status"] == "AVAILABLE":
-            self.issue_status_title.setText("Returned Card Ready")
-            self.issue_status_message.setText("Confirm to assign a new token to this reusable card.")
-            self.btn_provision.setEnabled(True)
-        else:
-            self.issue_status_title.setText("Card Is Already Active")
-            self.issue_status_message.setText("Return the card and refund its balance before setting it up again.")
-            self.btn_provision.setEnabled(False)
-
-    def _handle_provision_action(self) -> None:
-        if not self._active_uid:
-            QMessageBox.warning(self, "Set Up Card", "No card is present on the reader.")
-            return
-
-        confirm = QMessageBox.question(
-            self,
-            "Confirm Card Setup",
-            "Set up this card with a new food court token and a starting balance of ฿0.00?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
-
-        success, result = self.nfc_worker.provision_active_card()
-
-        if success:
-            token_uuid = result
-            database.register_provisioned_card(token_uuid, self._active_uid)
-
-            self._active_token_uuid = token_uuid
-            self._is_card_authenticated = True
-            self._last_card_status = "TOKEN_VERIFIED"
-
-            self.issue_status_title.setText("Card Set Up Successfully")
-            self.issue_status_message.setText("The card is active with a starting balance of ฿0.00.")
-            self.btn_provision.setEnabled(False)
-
-            self._update_identity_labels()
-            self._refresh_ledger()
-        else:
-            self.issue_status_title.setText("Card Setup Failed")
-            self.issue_status_message.setText(self._friendly_error(result))
-
-    # =========================================================
-    # ADD MONEY WITH CONFIRMATION
-    # =========================================================
-
-    def _prepare_top_up_confirmation(self) -> None:
-        self._clear_pending_top_up()
-
-        if not self._is_card_authenticated or not self._active_token_uuid:
-            self._set_top_up_feedback(
-                "Card Rejected",
-                f"The card could not be verified ({self._last_card_status}).",
-                False,
+            self.pending = (self.uid, self.token, amount)
+            self.topup_confirm.setEnabled(True)
+            set_banner(self.notice, "warning",
+                "Review and Confirm • ตรวจสอบจำนวนเงิน รับเงินสดแล้วจึงยืนยัน"
+                " • วางบัตรไว้จนสำเร็จ"
             )
-            return
 
+    def _parse_amount(self):
         try:
-            amount = float(self.amount_input.text().replace(",", "").strip())
-            if amount <= 0:
+            text = self.amount.text().strip()
+            value = Decimal(text)
+
+            if (
+                not value.is_finite()
+                or value <= 0
+                or value > self.MAX_BALANCE
+            ):
                 raise ValueError
-        except ValueError:
-            self._set_top_up_feedback(
-                "Invalid Amount",
-                "Enter an amount greater than zero. Then remove and tap the card again.",
-                False,
+
+            if value != value.quantize(Decimal("0.01")):
+                raise ValueError
+
+            return value
+        except (InvalidOperation, ValueError):
+            raise ValueError(
+                "กรอกจำนวนเงินมากกว่า 0"
+                " โดยมีทศนิยมไม่เกิน 2 ตำแหน่ง"
+                " และไม่ใส่เครื่องหมายอื่น"
             )
-            return
 
-        wallet = database.get_wallet_by_token(self._active_token_uuid)
-
-        if wallet is None:
-            self._set_top_up_feedback(
-                "Wallet Not Found",
-                "Set up this card before adding money.",
-                False,
-            )
-            return
-
-        if wallet["status"] != "ACTIVE":
-            self._set_top_up_feedback(
-                "Card Is Not Active",
-                "This card cannot receive money in its current status.",
-                False,
-            )
-            return
-
-        current_balance = float(wallet["balance"])
-        new_balance = current_balance + amount
-
-        self._pending_top_up_amount = amount
-        self._pending_top_up_uid = self._active_uid
-        self._pending_top_up_token = self._active_token_uuid
-
-        self._set_top_up_feedback(
-            "Card Verified — Confirm Amount",
-            f"Add ฿{amount:,.2f} to this card?\n"
-            f"Current balance: ฿{current_balance:,.2f}   New balance: ฿{new_balance:,.2f}",
-            True,
+    def _confirm_identity(self, uid, token):
+        return (
+            self._can_read()
+            and self.uid == uid
+            and self.token == token
         )
 
-        self.btn_confirm_top_up.setText(f"Confirm Add ฿{amount:,.2f}")
-        self.btn_confirm_top_up.setEnabled(True)
+    def _ask(self, title, message):
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle(title)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setText(message)
 
-    def _confirm_top_up(self) -> None:
+        yes = dialog.addButton(
+            "ยืนยัน", QMessageBox.ButtonRole.AcceptRole,
+        )
+        no = dialog.addButton(
+            "กลับไปตรวจสอบ", QMessageBox.ButtonRole.RejectRole,
+        )
+        dialog.setDefaultButton(no)
+        dialog.exec()
+        return dialog.clickedButton() == yes
+
+    def _busy(self, enabled):
+        self.busy = enabled
+
+        buttons = self.mode_buttons + self.preset_buttons + [
+            self.operation_nav,
+            self.history_nav,
+            self.issue_cancel,
+            self.topup_cancel,
+            self.return_cancel,
+            self.next_card,
+            self.card_history,
+            self.db_retry,
+        ]
+        for button in buttons:
+            button.setEnabled(not enabled)
+
+        self.amount.setEnabled(not enabled)
+        self._disable_actions()
+
+        if not enabled:
+            self.card_history.setEnabled(
+                self.checked_uid is not None,
+            )
+
+    def _issue(self):
         if (
-            self._pending_top_up_amount is None
-            or not self._pending_top_up_uid
-            or not self._pending_top_up_token
+            not self.issue_confirm.isEnabled()
+            or not self._can_read()
         ):
-            QMessageBox.warning(self, "Add Money", "No verified transaction is waiting for confirmation.")
+            return
+
+        uid, token = self.uid, self.token
+
+        if not self._ask(
+            "ยืนยันออกบัตร",
+            f"ออกบัตร {uid}\n"
+            "ยอดเงินเริ่มต้น ฿0.00\n"
+            "วางบัตรไว้จนรายการสำเร็จ",
+        ):
             return
 
         if (
-            not self._active_uid
-            or self._active_uid != self._pending_top_up_uid
-            or self._active_token_uuid != self._pending_top_up_token
+            not self._confirm_identity(uid, token)
+            or not self.issue_confirm.isEnabled()
         ):
-            self._clear_pending_top_up()
-            QMessageBox.warning(self, "Add Money", "The card was removed or changed. Please tap the card again.")
-            return
-
-        amount = self._pending_top_up_amount
-
-        success, message, balance = database.process_top_up(
-            self._pending_top_up_token,
-            self._pending_top_up_uid,
-            amount,
-        )
-
-        if success:
-            self._set_top_up_feedback(
-                "Money Added Successfully",
-                f"Added ฿{amount:,.2f}\nCurrent balance: ฿{balance:,.2f}\nRemove the card before the next transaction.",
-                True,
+            set_banner(self.notice, "error",
+                "ข้อมูลบัตรเปลี่ยนแล้ว"
+                " • นำบัตรออกแล้วแตะใหม่"
             )
-            self._clear_pending_top_up(keep_message=True)
-            self._refresh_ledger()
-        else:
-            self._set_top_up_feedback("Unable to Add Money", self._friendly_error(message), False)
-            self._clear_pending_top_up(keep_message=True)
-
-    def _handle_amount_changed(self, _new_text: str) -> None:
-        if self._pending_top_up_amount is None:
-            return
-        self._clear_pending_top_up()
-        self._set_top_up_feedback(
-            "Amount Changed",
-            "The previous confirmation was cancelled. Remove the card and tap it again to confirm the new amount.",
-            None,
-        )
-
-    def _clear_pending_top_up(self, keep_message: bool = False) -> None:
-        self._pending_top_up_amount = None
-        self._pending_top_up_uid = None
-        self._pending_top_up_token = None
-
-        if hasattr(self, "btn_confirm_top_up"):
-            self.btn_confirm_top_up.setEnabled(False)
-            self.btn_confirm_top_up.setText("Confirm Add Money")
-
-        if not keep_message and hasattr(self, "top_up_status_title") and not self._active_uid:
-            self._set_top_up_feedback("Ready to Scan", "Place the card on the NFC reader.", None)
-
-    # =========================================================
-    # CHECK BALANCE
-    # =========================================================
-
-    def _show_balance(self) -> None:
-        self._update_identity_labels()
-
-        if not self._is_card_authenticated or not self._active_token_uuid:
-            self.check_balance_value.setText("—")
-            self.check_status.setText("Card Rejected")
-            self.check_status.setStyleSheet("color: #B42318;")
-            self.check_message.setText(f"The card could not be verified ({self._last_card_status}).")
             return
 
-        wallet = database.get_wallet_by_token(self._active_token_uuid)
-
-        if wallet is None:
-            self.check_balance_value.setText("—")
-            self.check_status.setText("Wallet Not Found")
-            self.check_status.setStyleSheet("color: #B42318;")
-            self.check_message.setText("Set up this card before use.")
-            return
-
-        self.check_balance_value.setText(f"฿{wallet['balance']:,.2f}")
-        self.check_status.setText(str(wallet["status"]).title())
-        self.check_status.setStyleSheet("color: #087A58;")
-        self.check_message.setText("Card verified successfully. Remove the card when finished.")
-
-    # =========================================================
-    # RETURN CARD
-    # =========================================================
-
-    def _prepare_return_view(self) -> None:
-        self._update_identity_labels()
-        self.btn_return.setEnabled(False)
-
-        if not self._is_card_authenticated or not self._active_token_uuid:
-            self.return_balance_value.setText("—")
-            self.return_refund_value.setText("—")
-            self.return_card_status.setText("Card Rejected")
-            self.return_warning.setText(f"The card could not be verified ({self._last_card_status}).")
-            return
-
-        wallet = database.get_wallet_by_token(self._active_token_uuid)
-
-        if wallet is None:
-            self.return_balance_value.setText("—")
-            self.return_refund_value.setText("—")
-            self.return_card_status.setText("Wallet Not Found")
-            self.return_warning.setText("No wallet record exists for this card.")
-            return
-
-        balance = float(wallet["balance"])
-        status = str(wallet["status"])
-
-        self.return_balance_value.setText(f"฿{balance:,.2f}")
-        self.return_refund_value.setText(f"฿{balance:,.2f}")
-        self.return_card_status.setText(status.title())
-
-        if status == "ACTIVE":
-            self.return_warning.setText(
-                "After confirmation, the balance will become ฿0.00 and the card will be available for reuse."
-            )
-            self.btn_return.setEnabled(True)
-        else:
-            self.return_warning.setText("This card has already been returned.")
-
-    def _handle_return_action(self) -> None:
-        if not self._active_uid or not self._active_token_uuid:
-            QMessageBox.warning(self, "Return Card", "No verified card is present.")
-            return
-
-        wallet = database.get_wallet_by_token(self._active_token_uuid)
-
-        if wallet is None:
-            QMessageBox.warning(self, "Return Card", "No wallet record was found.")
-            return
-
-        refund_amount = float(wallet["balance"])
-
-        confirm = QMessageBox.question(
-            self,
-            "Confirm Refund and Card Return",
-            f"Refund ฿{refund_amount:,.2f} and make this card available for reuse?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
-
-        success, message, refunded_amount = database.process_card_return(
-            self._active_token_uuid,
-            self._active_uid,
-        )
-
-        if success:
-            self.return_balance_value.setText("฿0.00")
-            self.return_refund_value.setText(f"฿{refunded_amount:,.2f}")
-            self.return_card_status.setText("Available")
-            self.return_warning.setText(f"Return completed. Give ฿{refunded_amount:,.2f} to the customer.")
-            self.btn_return.setEnabled(False)
-            self._refresh_ledger()
-        else:
-            QMessageBox.warning(self, "Return Card", self._friendly_error(message))
-
-    # =========================================================
-    # RESET AND FEEDBACK
-    # =========================================================
-
-    def _reset_card_views(self) -> None:
-        self.issue_status_title.setText("Ready for a New Card")
-        self.issue_status_message.setText("Place the card on the NFC reader.")
-        self.issue_uid.setText("UID: —")
-        self.btn_provision.setEnabled(False)
-
-        self._set_top_up_feedback("Ready to Scan", "Place the card on the NFC reader.", None)
-        self.top_up_identity.setText("UID: —     Token: Not detected")
-
-        self.check_balance_value.setText("—")
-        self.check_status.setText("Waiting for Card")
-        self.check_status.setStyleSheet("color: #075E48;")
-        self.check_message.setText("Place the card on the NFC reader.")
-        self.check_identity.setText("UID: —     Token: Not detected")
-
-        self._clear_return_preview()
-
-    def _clear_return_preview(self) -> None:
-        self.return_balance_value.setText("—")
-        self.return_refund_value.setText("—")
-        self.return_card_status.setText("Waiting for Card")
-        self.return_warning.setText(
-            "Tap a card to display the refundable balance. No change will be made until you confirm."
-        )
-        self.return_identity.setText("UID: —     Token: Not detected")
-        self.btn_return.setEnabled(False)
-
-    def _update_identity_labels(self) -> None:
-        uid = self._active_uid or "—"
-        
-        # Removed [12:] to display the full 36-character Token UUID
-        token = self._active_token_uuid if self._active_token_uuid else "Not detected"
-        identity_text = f"UID: {uid}     Token: {token}"
-
-        # Print the Token UUID to the terminal for easy copying during web application testing
-        if self._active_token_uuid:
-            print(f"\n[DEBUG] Use this Token for web testing: {self._active_token_uuid}\n")
-
-        self.issue_uid.setText(f"UID: {uid}")
-        self.top_up_identity.setText(identity_text)
-        self.check_identity.setText(identity_text)
-        self.return_identity.setText(identity_text)
-
-    def _set_top_up_feedback(self, title: str, message: str, success: Optional[bool]) -> None:
-        self.top_up_status_title.setText(title)
-        self.top_up_status_message.setText(message)
-
-        if success is True:
-            color = "#087A58"
-        elif success is False:
-            color = "#B42318"
-        else:
-            color = "#075E48"
-
-        self.top_up_status_title.setStyleSheet(f"color: {color};")
-
-    @staticmethod
-    def _friendly_error(code: str) -> str:
-        messages = {
-            "INVALID_AMOUNT": "The amount must be greater than zero.",
-            "WALLET_NOT_FOUND": "No wallet record was found for this card.",
-            "WALLET_SUSPENDED": "This card is not active.",
-            "CARD_NOT_ACTIVE": "This card is not active.",
-            "CARD_NOT_PRESENT": "Keep the card on the reader and try again.",
-            "HARDWARE_NOT_INITIALIZED": "The NFC reader is not connected.",
+        operation_id = str(uuid.uuid4())
+        self.current_operation = operation_id
+        self.operation_request = {
+            "kind": "ISSUE", "uid": uid, "old_token": token,
+            "new_token": None,
         }
-        return messages.get(code, str(code).replace("_", " ").title())
+        self._busy(True)
+        set_banner(self.notice, "warning",
+            "Setting Up Card • กำลังออกบัตร"
+            " • ห้ามนำบัตรออกหรือปิดโปรแกรม"
+        )
 
-    # =========================================================
-    # NFC READER STATUS
-    # =========================================================
+        def operation():
+            self.store.begin_issue(operation_id, uid, token)
+            success, new_token = self.worker.provision_expected_card(uid)
+            if not success:
+                return self.store.cancel_operation(operation_id, new_token)
+            self.operation_request["new_token"] = new_token
+            self.store.attach_issue_token(operation_id, uid, new_token)
+            return self.store.finish_issue(operation_id, uid, new_token)
 
-    def _update_reader_connection_state(self) -> None:
-        if self.nfc_worker.is_alive():
-            self.reader_status_label.setText("●  NFC Reader Connected")
-            self.reader_status_label.setStyleSheet("")
-        else:
-            self.reader_status_label.setText("●  NFC Reader Not Connected")
-            self.reader_status_label.setStyleSheet(
-                "background-color: #FDECEC;"
-                "border: 1px solid #F3B7B2;"
-                "border-radius: 15px;"
-                "color: #B42318;"
-                "font-size: 15px;"
-                "font-weight: 700;"
-                "padding: 8px 14px;"
+        def done(result):
+            if not result.get("success"):
+                self._busy(False)
+                self._clear_operation()
+                set_banner(self.notice, "error",
+                    "Card Setup Failed • เขียนหรือตรวจสอบบัตรไม่สำเร็จ "
+                    "นำบัตรออกแล้วลองใหม่"
+                )
+                return
+
+            new_token = result["token"]
+            if self.uid == uid:
+                self.token = new_token
+                self.valid = True
+                self.card_status = "TOKEN_VERIFIED"
+                self.blocked_uid = uid
+
+            self._busy(False)
+            self._clear_operation()
+            self._details()
+            set_banner(self.notice, "success",
+                "Card Set Up Successfully • ออกบัตรสำเร็จ ยอดเงิน ฿0.00"
+                " • นำบัตรออก แล้วเลือกเติมเงินและแตะใหม่"
             )
+            self._refresh_history()
 
-    # =========================================================
-    # CLOSE APPLICATION
-    # =========================================================
+        self._job(
+            operation,
+            done,
+            lambda: self._unknown(
+                "ไม่สามารถยืนยันผลการออกบัตรได้"
+                " อย่าออกบัตรซ้ำทันที"
+            ),
+        )
 
-    def closeEvent(self, event) -> None:
-        if hasattr(self, "nfc_worker") and self.nfc_worker is not None:
-            self.nfc_worker.stop()
+    def _topup(self):
+        if (
+            not self.pending
+            or not self.topup_confirm.isEnabled()
+        ):
+            return
+
+        snapshot = self.pending
+        uid, token, amount = snapshot
+
+        if not self._ask(
+            "ยืนยันเติมเงิน",
+            f"Card ID: {uid}\n"
+            f"เติมเงิน {money(amount)}\n"
+            "ได้รับเงินสดแล้วใช่ไหม?",
+        ):
+            return
+
+        if (
+            self.pending != snapshot
+            or not self._confirm_identity(uid, token)
+        ):
+            set_banner(self.notice, "error",
+                "ข้อมูลบัตรหรือจำนวนเงินเปลี่ยนแล้ว"
+                " • ตรวจสอบสรุปใหม่ก่อนยืนยัน"
+            )
+            return
+
+        operation_id = str(uuid.uuid4())
+        self.current_operation = operation_id
+        self.operation_request = {
+            "kind": "TOP_UP", "uid": uid, "token": token,
+            "amount": str(amount),
+        }
+        self.pending = None
+        self._busy(True)
+        set_banner(self.notice, "warning",
+            "Saving Top Up • กำลังเติมเงิน"
+            " • ห้ามนำบัตรออกหรือปิดโปรแกรม"
+        )
+
+        def done(result):
+            if not result.get("success"):
+                self._transaction_failure(result.get("reason"))
+                return
+
+            balance = Decimal(str(result["balance"]))
+            self.blocked_uid = uid
+            self._busy(False)
+            self._clear_operation()
+            self.new_balance.setText(money(balance))
+            set_banner(self.notice, "success",
+                f"Top Up Successful • เติมเงินสำเร็จ {money(amount)}"
+                f" • ยอดคงเหลือ {money(balance)}"
+                " • นำบัตรออกได้"
+            )
+            self._refresh_history()
+
+        self._job(
+            lambda: self.store.top_up(operation_id, token, uid, amount),
+            done,
+            lambda: self._unknown(
+                "ติดต่อฐานข้อมูลขณะเติมเงินผิดพลาด"
+                " ต้องตรวจสอบผลก่อนทำซ้ำ"
+            ),
+        )
+
+    def _return_card(self):
+        if (
+            not self.return_confirm.isEnabled()
+            or not self.wallet
+        ):
+            return
+
+        uid, token = self.uid, self.token
+        displayed_amount = self.wallet.get("balance", 0)
+
+        if not self._ask(
+            "ยืนยันคืนบัตร",
+            f"Card ID: {uid}\n"
+            f"ยอดคงเหลือที่อ่านล่าสุด {money(displayed_amount)}\n"
+            "ระบบจะคืนเงินคงเหลือทั้งหมดและปิดการใช้งานรอบนี้\n"
+            "เก็บบัตรไว้ที่แคชเชียร์",
+        ):
+            return
+
+        if (
+            not self._confirm_identity(uid, token)
+            or not self.return_confirm.isEnabled()
+        ):
+            set_banner(self.notice, "error",
+                "ข้อมูลบัตรเปลี่ยนแล้ว"
+                " • ตรวจสอบบัตรใหม่ก่อนยืนยัน"
+            )
+            return
+
+        operation_id = str(uuid.uuid4())
+        self.current_operation = operation_id
+        self.operation_request = {
+            "kind": "RETURN_CARD", "uid": uid, "token": token,
+        }
+        self._busy(True)
+        set_banner(self.notice, "warning",
+            "Returning Card • กำลังคืนบัตร"
+            " • ห้ามนำบัตรออกหรือปิดโปรแกรม"
+        )
+
+        def done(result):
+            if not result.get("success"):
+                self._transaction_failure(result.get("reason"))
+                return
+
+            refund = Decimal(str(result["amount"]))
+            self.blocked_uid = uid
+            self._busy(False)
+            self._clear_operation()
+            self.return_amount.setText(money(refund))
+            self.return_status.setText(
+                "Card Status: Returned / Available • Balance ฿0.00",
+            )
+            set_banner(self.notice, "success",
+                f"Card Returned Successfully • คืนเงินสด {money(refund)}"
+                " ให้ลูกค้า และเก็บบัตรไว้"
+            )
+            self._refresh_history()
+
+        self._job(
+            lambda: self.store.return_card(operation_id, token, uid),
+            done,
+            lambda: self._unknown(
+                "ติดต่อฐานข้อมูลขณะคืนบัตรผิดพลาด"
+                " ต้องตรวจสอบผลก่อนทำซ้ำ"
+            ),
+        )
+
+    def _transaction_failure(self, reason):
+        known = {
+            "INVALID_AMOUNT": "จำนวนเงินไม่ถูกต้อง",
+            "WALLET_NOT_FOUND": "ไม่พบกระเป๋าเงิน",
+            "WALLET_SUSPENDED": "บัตรไม่พร้อมใช้งาน",
+            "CARD_NOT_ACTIVE": "บัตรนี้คืนแล้วหรือไม่พร้อมใช้งาน",
+            "CARD_ID_MISMATCH": "Card ID ไม่ตรงกับรอบการใช้งาน",
+            "BALANCE_LIMIT": "ยอดเงินหลังเติมเกินขีดจำกัด",
+            "OPERATION_CANCELLED": "รายการนี้ถูกยกเลิกแล้ว",
+        }
+
+        if reason not in known:
+            self._unknown(
+                "ไม่สามารถยืนยันผลธุรกรรมได้"
+                " • ดูประวัติก่อน และอย่าทำรายการเดิมซ้ำ"
+            )
+            return
+
+        self.blocked_uid = self.uid
+        self._busy(False)
+        self._clear_operation()
+        set_banner(self.notice, "error",
+            f"ไม่ได้ทำรายการ: {known[reason]}"
+            " • นำบัตรออกแล้วตรวจสอบใหม่"
+        )
+
+    def _unknown(self, message):
+        self.uncertain = True
+        self.pending = None
+        self._busy(False)
+        self._disable_actions()
+        self.recover_button.show()
+        set_banner(self.notice, "error", message)
+
+        QMessageBox.warning(
+            self,
+            "ต้องตรวจสอบผลรายการ",
+            message
+            + "\nหยุดทำรายการบัตรนี้และติดต่อผู้ดูแลก่อนเริ่มใหม่",
+        )
+        self._refresh_history()
+
+    def _clear_operation(self):
+        self.current_operation = None
+        self.operation_request = None
+        self.uncertain = False
+        self.recover_button.hide()
+
+    def _recover_operation(self):
+        request = self.operation_request
+        operation_id = self.current_operation
+        if not request or not operation_id or self.busy:
+            return
+        if self.uid != request.get("uid"):
+            set_banner(self.notice, "error",
+                "Tap the Same Card • ต้องวางบัตรใบเดิมเพื่อทำการตรวจสอบรายการก่อนหน้า"
+            )
+            return
+
+        self._busy(True)
+        self.recover_button.hide()
+        set_banner(self.notice, "warning", "Checking Previous Operation… • กำลังตรวจสอบผลรายการก่อนหน้า")
+
+        def recover():
+            kind = request["kind"]
+            if kind == "TOP_UP":
+                return self.store.top_up(
+                    operation_id, request["token"], request["uid"],
+                    Decimal(request["amount"]),
+                )
+            if kind == "RETURN_CARD":
+                return self.store.return_card(
+                    operation_id, request["token"], request["uid"],
+                )
+            token = request.get("new_token")
+            if not token and self.valid and self.token:
+                token = self.token
+            if not token:
+                raise RuntimeError("ISSUE_TOKEN_UNKNOWN")
+            self.store.begin_issue(operation_id, request["uid"], request.get("old_token"))
+            try:
+                self.store.attach_issue_token(operation_id, request["uid"], token)
+            except RuntimeError as error:
+                if str(error) != "ISSUE_OPERATION_NOT_PENDING":
+                    raise
+            return self.store.finish_issue(operation_id, request["uid"], token)
+
+        def done(result):
+            kind = request["kind"]
+            if not result.get("success"):
+                self._transaction_failure(result.get("reason"))
+                return
+            self._busy(False)
+            self._clear_operation()
+            if kind == "ISSUE":
+                self.blocked_uid = request["uid"]
+                set_banner(self.notice, "success", "Card Setup Confirmed • ยืนยันผลการออกบัตรสำเร็จ นำบัตรออกได้")
+            elif kind == "TOP_UP":
+                self.blocked_uid = request["uid"]
+                set_banner(self.notice, "success",
+                    f"Top Up Confirmed • ยอดคงเหลือ {money(result['balance'])} • นำบัตรออกได้"
+                )
+            else:
+                self.blocked_uid = request["uid"]
+                set_banner(self.notice, "success",
+                    f"Return Confirmed • คืนเงินสด {money(result['amount'])} และเก็บบัตรไว้"
+                )
+            self._refresh_history()
+
+        self._job(recover, done, lambda: self._unknown(
+            "ยังยืนยันผลรายการไม่ได้ • กรุณาคงบัตรไว้และให้ผู้ดูแลตรวจสอบ Database"
+        ))
+
+    def _checked_history(self):
+        if self.checked_uid and self.checked_token:
+            self.history_uid = self.checked_uid
+            self.history_token = self.checked_token
+            self._navigate(1)
+
+    def _all_history(self):
+        self.history_uid = None
+        self.history_token = None
+        self._refresh_history()
+
+    def _history_double_click(self, row, column):
+        if column != 1:
+            return
+
+        item = self.table.item(row, column)
+        if item and item.data(Qt.ItemDataRole.UserRole):
+            identity = item.data(Qt.ItemDataRole.UserRole)
+            self.history_uid = identity["uid"]
+            self.history_token = identity["token"]
+            self._refresh_history()
+
+    def _auto_history(self):
+        if (
+            self.pages.currentIndex() == 1
+            and self.history_refresh.isEnabled()
+        ):
+            self._refresh_history()
+
+    def _refresh_history(self):
+        self.history_epoch += 1
+        generation = self.history_epoch
+        uid, token = self.history_uid, self.history_token
+
+        self.history_title.setText(
+            "ประวัติของบัตรใบนี้"
+            if token else "รายการทั้งหมด"
+        )
+        self.show_all.setEnabled(token is not None)
+        self.history_focus.setVisible(token is not None)
+        if token:
+            self.history_focus.setText(
+                f"กำลังดู Card ID: {uid} • แสดงเฉพาะรายการหลังออกบัตรครั้งล่าสุด"
+            )
+        self.table.setRowCount(0)
+
+        if not self.db_ready:
+            self.history_message.setText(
+                "ฐานข้อมูลไม่พร้อม"
+                " • เชื่อมต่อฐานข้อมูลก่อนดูประวัติ"
+            )
+            return
+
+        self.history_refresh.setEnabled(False)
+        self.history_message.setText("กำลังโหลดประวัติ…")
+
+        def done(records):
+            if generation != self.history_epoch:
+                return
+
+            self.history_refresh.setEnabled(True)
+            self.table.setRowCount(len(records))
+
+            for row, record in enumerate(records):
+                stamp = record.get("timestamp", "")
+                try:
+                    stamp = datetime.fromisoformat(
+                        str(stamp),
+                    ).strftime("%d/%m/%Y %H:%M:%S")
+                except (ValueError, TypeError):
+                    stamp = str(stamp)
+
+                action = record.get("action_type", "")
+                action_text = {
+                    "SETUP_CARD": "ออกบัตร / เปิดรอบใหม่",
+                    "TOP_UP": "เติมเงิน",
+                    "PAY": "ชำระค่าอาหาร",
+                    "REFUND_RETURN": "คืนเงิน / คืนบัตร",
+                }.get(action, action)
+
+                terminal = record.get("terminal_type", "")
+                terminal_text = {
+                    "CASHIER": "แคชเชียร์",
+                    "STALL_POS": "ร้านค้า",
+                    "STALL": "ร้านค้า",
+                }.get(terminal, terminal)
+
+                amount = Decimal(str(record.get("amount", 0)))
+
+                if action == "TOP_UP":
+                    prefix = "+"
+                elif action in ("PAY", "REFUND_RETURN"):
+                    prefix = "−"
+                else:
+                    prefix = ""
+
+                card_uid = record.get("card_uid")
+                values = (
+                    stamp,
+                    card_uid or "—",
+                    terminal_text,
+                    action_text,
+                    prefix + money(abs(amount)),
+                    money(record.get("balance_after", 0)),
+                    record.get("operation_status", "COMPLETED").title(),
+                )
+
+                for column, value in enumerate(values):
+                    item = QTableWidgetItem(str(value))
+
+                    if column == 1 and card_uid:
+                        item.setData(
+                            Qt.ItemDataRole.UserRole,
+                            {
+                                "uid": card_uid,
+                                "token": record.get("token_uuid"),
+                            },
+                        )
+                        item.setForeground(QColor("#08774f"))
+                        font = item.font()
+                        font.setUnderline(True)
+                        item.setFont(font)
+
+                    if column in (4, 5):
+                        item.setTextAlignment(
+                            Qt.AlignmentFlag.AlignRight
+                            | Qt.AlignmentFlag.AlignVCenter,
+                        )
+
+                    if column == 4:
+                        if prefix == "+":
+                            color = "#08774f"
+                        elif prefix == "−":
+                            color = "#b34b37"
+                        else:
+                            color = "#20392f"
+                        item.setForeground(QColor(color))
+
+                    self.table.setItem(row, column, item)
+
+            if records:
+                self.history_message.setText(
+                    f"แสดงรายการล่าสุด {len(records)} รายการ"
+                    f" (สูงสุด {self.HISTORY_LIMIT})"
+                    " • จำนวนเงินเป็นการเคลื่อนไหวของยอดในบัตร"
+                )
+            else:
+                self.history_message.setText(
+                    "ยังไม่มีธุรกรรมในรายการที่เลือก",
+                )
+
+        def failed():
+            if generation == self.history_epoch:
+                self.history_refresh.setEnabled(True)
+                self.history_message.setText(
+                    "โหลดประวัติไม่ได้"
+                    " • ตรวจสอบฐานข้อมูลแล้วกดรีเฟรช"
+                )
+
+        self._job(
+            lambda: self.store.history(self.HISTORY_LIMIT, token),
+            done,
+            failed,
+        )
+
+    def closeEvent(self, event):
+        if self.busy or any(
+            job.isRunning() for job in self.jobs
+        ):
+            QMessageBox.information(
+                self,
+                "กรุณารอ",
+                "รอให้โปรแกรมตรวจสอบหรือทำรายการเสร็จก่อนปิดค่ะ",
+            )
+            event.ignore()
+            return
+
+        self.reader_timer.stop()
+        self.history_timer.stop()
+        self.worker.stop()
         event.accept()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        compact = self.height() < 720
+
+        if compact == self.compact:
+            return
+
+        self.compact = compact
+        extra = """
+        QLabel#title { font-size: 20px; }
+        QLabel#section { font-size: 18px; }
+        QLabel#money { font-size: 38px; }
+        QPushButton#preset { font-size: 18px; padding: 6px; }
+        QLineEdit { font-size: 28px; padding: 6px 10px; }
+        """ if compact else ""
+
+        self.setStyleSheet(STYLE + extra)
+
+        for frame in self.findChildren(QFrame):
+            if (
+                frame.objectName() in ("panel", "hero")
+                and frame.layout()
+            ):
+                margins = (
+                    (12, 10, 12, 10)
+                    if compact else (20, 18, 20, 18)
+                )
+                frame.layout().setContentsMargins(*margins)
+                frame.layout().setSpacing(7 if compact else 12)
 
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    app.setStyleSheet(CASHIER_STYLE)
-    app.setFont(QFont("Segoe UI", 14))
+    app.setStyle("Fusion")
+    app.setStyleSheet(STYLE)
+    app.setFont(QFont("Tahoma", 10))
 
     window = CashierApp()
     window.showMaximized()
