@@ -11,7 +11,7 @@ from adafruit_pn532.uart import PN532_UART
 DEFAULT_PORT = "COM4"
 
 # ⚠️ เปลี่ยน IP ตรงนี้เป็น IPv4 ของคอมพิวเตอร์คุณ (เช่น http://192.168.1.45:8000)
-BASE_URL = "http://192.168.1.100:8000" 
+BASE_URL = "http://10.59.30.226:8000" 
 
 class NFCWorker(threading.Thread):
     def __init__(
