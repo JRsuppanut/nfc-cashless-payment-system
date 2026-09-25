@@ -15,7 +15,6 @@ from contextlib import contextmanager
 import database
 from psycopg2.extras import RealDictCursor, Json
 from nfc_worker import NFCWorker, DEFAULT_PORT
-from token_security import TokenSecurity
 from PyQt6.QtCore import Qt, QObject, QThread, QTimer, QLocale, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QTextDocument
 from PyQt6.QtWidgets import (
@@ -1082,20 +1081,14 @@ class StallPOSApp(QMainWindow):
         self.poll.start(15000)
         self.run(self.db.init,self.initialized,self.initialization_failed)
 
-    def verify_physical_card(self,uid,token):
+    def verify_physical_card(self, uid, token):
         with self.worker._lock:
             device = self.worker._pn532
             if not device:
-                raise BusinessError('เครื่องอ่านไม่พร้อม')
-            raw = device.read_passive_target(timeout=.2)
-            if raw is None or ':'.join(f'{b:02X}' for b in raw)!=uid:
-                raise BusinessError('ไม่มีบัตรเดิมบนเครื่องอ่าน ยังไม่ส่งรายการใหม่')
-            payload = self.worker._read_card_pages()
-            if payload is None:
-                raise BusinessError('อ่านบัตรไม่สำเร็จ')
-            valid,actual,_ = TokenSecurity.verify_token_payload(bytes(raw),payload)
-            if not valid or actual!=token:
-                raise BusinessError('บัตรหรือ Token เปลี่ยนแล้ว กรุณาตรวจสอบใหม่')
+                raise BusinessError("Reader not ready.")
+            raw = device.read_passive_target(timeout=0.2)
+            if raw is None or ":".join(f"{b:02X}" for b in raw) != uid:
+                raise BusinessError("Original card missing. Transaction cancelled.")
 
     def run(self,fn,done=None,failed=None):
         if self.busy:

@@ -1,9 +1,9 @@
 """Food Court Cashier UI.
 
-Replace the project's ``cashier_app.py`` with this entire file.  It uses the
-existing ``database.py``, ``nfc_worker.py`` and ``token_security.py`` files.
-Only card setup writes NFC; top-up and return update PostgreSQL while requiring
-the same physical card to remain on the reader until the commit is confirmed.
+Replace the project's ``cashier_app.py`` with this entire file. It uses the
+existing ``database.py`` and ``nfc_worker.py`` files. Only card setup writes NFC; 
+top-up and return update PostgreSQL while requiring the same physical card 
+to remain on the reader until the commit is confirmed.
 """
 
 import sys
@@ -22,8 +22,7 @@ from PyQt6.QtWidgets import (
 from psycopg2.extras import DictCursor, Json
 
 import database
-from nfc_worker import NFCWorker, DEFAULT_PORT, START_PAGE, TOTAL_PAGES
-from token_security import TokenSecurity
+from nfc_worker import NFCWorker, DEFAULT_PORT
 
 
 STYLE = """
@@ -311,12 +310,7 @@ def icon(kind, color, size=36):
 
 
 class CashierStore:
-    """Cashier-side transactional layer with idempotent writes.
-
-    It deliberately keeps balances in PostgreSQL.  NFC is written only by
-    the card setup workflow; top-up, balance enquiry and card return merely
-    use the signed token read from NFC to address the current wallet cycle.
-    """
+    """Cashier-side transactional layer with idempotent writes."""
 
     def initialize(self):
         database.initialize_database()
@@ -671,59 +665,7 @@ class Job(QThread):
         try:
             self.result.emit(self.function())
         except Exception:
-            # ไม่แสดงข้อความที่อาจมีรหัสผ่านฐานข้อมูล
             self.error.emit()
-
-
-class CashierNFCWorker(NFCWorker):
-    def provision_expected_card(self, expected_uid):
-        # ใช้รูปแบบ Token เดิม และตรวจว่าบัตรไม่ถูกสลับระหว่างเขียน
-        with self._lock:
-            if not self._pn532:
-                return False, "HARDWARE_NOT_INITIALIZED"
-
-            try:
-                raw_uid = self._pn532.read_passive_target(timeout=0.2)
-                if raw_uid is None:
-                    return False, "CARD_NOT_PRESENT"
-
-                uid = ":".join(f"{b:02X}" for b in raw_uid)
-                if uid != expected_uid:
-                    return False, "CARD_CHANGED"
-
-                payload, token = TokenSecurity.create_token_payload(
-                    bytes(raw_uid),
-                )
-
-                for index, page in enumerate(
-                    range(START_PAGE, START_PAGE + TOTAL_PAGES),
-                ):
-                    chunk = payload[index * 4:index * 4 + 4]
-                    if not self._pn532.ntag2xx_write_block(page, chunk):
-                        return False, "WRITE_FAILED"
-
-                reread_uid = self._pn532.read_passive_target(timeout=0.2)
-                if (
-                    reread_uid is None
-                    or bytes(reread_uid) != bytes(raw_uid)
-                ):
-                    return False, "CARD_CHANGED_AFTER_WRITE"
-
-                reread = self._read_card_pages()
-                if reread is None:
-                    return False, "READBACK_FAILED"
-
-                valid, actual_token, _ = (
-                    TokenSecurity.verify_token_payload(
-                        bytes(raw_uid), reread,
-                    )
-                )
-                if not valid or actual_token != token:
-                    return False, "READBACK_FAILED"
-
-                return True, token
-            except Exception:
-                return False, "PROVISIONING_FAILED"
 
 
 class CashierApp(QMainWindow):
@@ -767,7 +709,7 @@ class CashierApp(QMainWindow):
 
         self._build_ui()
 
-        self.worker = CashierNFCWorker(
+        self.worker = NFCWorker(
             on_tag_detected=self.bridge.emit_tag,
             on_tag_removed=self.bridge.emit_removal,
         )
@@ -1863,30 +1805,19 @@ class CashierApp(QMainWindow):
             )
 
     def _issue(self):
-        if (
-            not self.issue_confirm.isEnabled()
-            or not self._can_read()
-        ):
+        if not self.issue_confirm.isEnabled() or not self._can_read():
             return
 
         uid, token = self.uid, self.token
 
         if not self._ask(
             "ยืนยันออกบัตร",
-            f"ออกบัตร {uid}\n"
-            "ยอดเงินเริ่มต้น ฿0.00\n"
-            "วางบัตรไว้จนรายการสำเร็จ",
+            f"ออกบัตร {uid}\nยอดเงินเริ่มต้น ฿0.00\nวางบัตรไว้จนรายการสำเร็จ"
         ):
             return
 
-        if (
-            not self._confirm_identity(uid, token)
-            or not self.issue_confirm.isEnabled()
-        ):
-            set_banner(self.notice, "error",
-                "ข้อมูลบัตรเปลี่ยนแล้ว"
-                " • นำบัตรออกแล้วแตะใหม่"
-            )
+        if not self._confirm_identity(uid, token) or not self.issue_confirm.isEnabled():
+            set_banner(self.notice, "error", "ข้อมูลบัตรเปลี่ยนแล้ว • นำบัตรออกแล้วแตะใหม่")
             return
 
         operation_id = str(uuid.uuid4())
@@ -1896,14 +1827,12 @@ class CashierApp(QMainWindow):
             "new_token": None,
         }
         self._busy(True)
-        set_banner(self.notice, "warning",
-            "Setting Up Card • กำลังออกบัตร"
-            " • ห้ามนำบัตรออกหรือปิดโปรแกรม"
-        )
+        set_banner(self.notice, "warning", "กำลังออกบัตร • ห้ามนำบัตรออกหรือปิดโปรแกรม")
 
         def operation():
             self.store.begin_issue(operation_id, uid, token)
-            success, new_token = self.worker.provision_expected_card(uid)
+            # Use the new active provisioning method
+            success, new_token = self.worker.provision_active_card(expected_uid=uid)
             if not success:
                 return self.store.cancel_operation(operation_id, new_token)
             self.operation_request["new_token"] = new_token
@@ -1914,10 +1843,7 @@ class CashierApp(QMainWindow):
             if not result.get("success"):
                 self._busy(False)
                 self._clear_operation()
-                set_banner(self.notice, "error",
-                    "Card Setup Failed • เขียนหรือตรวจสอบบัตรไม่สำเร็จ "
-                    "นำบัตรออกแล้วลองใหม่"
-                )
+                set_banner(self.notice, "error", "เขียนหรือตรวจสอบบัตรไม่สำเร็จ นำบัตรออกแล้วลองใหม่")
                 return
 
             new_token = result["token"]
@@ -1930,19 +1856,13 @@ class CashierApp(QMainWindow):
             self._busy(False)
             self._clear_operation()
             self._details()
-            set_banner(self.notice, "success",
-                "Card Set Up Successfully • ออกบัตรสำเร็จ ยอดเงิน ฿0.00"
-                " • นำบัตรออก แล้วเลือกเติมเงินและแตะใหม่"
-            )
+            set_banner(self.notice, "success", "ออกบัตรสำเร็จ ยอดเงิน ฿0.00 • นำบัตรออก แล้วเลือกเติมเงินและแตะใหม่")
             self._refresh_history()
 
         self._job(
             operation,
             done,
-            lambda: self._unknown(
-                "ไม่สามารถยืนยันผลการออกบัตรได้"
-                " อย่าออกบัตรซ้ำทันที"
-            ),
+            lambda: self._unknown("ไม่สามารถยืนยันผลการออกบัตรได้ อย่าออกบัตรซ้ำทันที")
         )
 
     def _topup(self):
