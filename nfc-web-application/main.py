@@ -1,14 +1,23 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Depends
-from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
-import json
-# For actual database connection, uncomment and configure SQLAlchemy models
-# from database import get_db, Wallet
+"""
+Main entry point for the FastAPI Web Application.
+Provides endpoints for the Customer Portal.
+"""
 
-app = FastAPI()
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
+
+import database
+
+# Initialize the FastAPI application
+app = FastAPI(title="Food Court Customer Portal")
+
+# Configure the directory for Jinja2 HTML templates
 templates = Jinja2Templates(directory="templates")
 
-class ConnectionManager:
+@app.get("/wallet", response_class=HTMLResponse)
+async def check_wallet(request: Request, t: str = None, s: str = None):
     """
     Manages WebSocket connections for real-time broadcasting to display nodes.
     """
@@ -36,7 +45,7 @@ async def serve_kiosk_page(request: Request):
     """
     Serves the Kiosk Dashboard HTML page.
     """
-    return templates.TemplateResponse(request=request, name="kiosk.html")
+    return templates.TemplateResponse("kiosk.html", {"request": request})
 
 @app.websocket("/ws/kiosk")
 async def websocket_kiosk_endpoint(websocket: WebSocket):
