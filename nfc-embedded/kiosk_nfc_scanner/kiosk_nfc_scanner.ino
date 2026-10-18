@@ -11,8 +11,8 @@ const char* WIFI_PASSWORD = "password";
 const char* SERVER_URL = "http://10.137.155.226:8000/api/kiosk/scan";
 
 // UART Configuration for PN532
-#define PN532_RX_PIN 16
-#define PN532_TX_PIN 17
+#define PN532_RX_PIN 4
+#define PN532_TX_PIN 5
 #define PN532_RESET 3
 
 // Initialize HardwareSerial 1 for ESP32

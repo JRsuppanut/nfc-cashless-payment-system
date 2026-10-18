@@ -36,7 +36,7 @@ async def serve_kiosk_page(request: Request):
     """
     Serves the Kiosk Dashboard HTML page.
     """
-    return templates.TemplateResponse("kiosk.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="kiosk.html")
 
 @app.websocket("/ws/kiosk")
 async def websocket_kiosk_endpoint(websocket: WebSocket):
