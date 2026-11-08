@@ -4,9 +4,10 @@ Provides endpoints for the Customer Portal.
 """
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
+from typing import List
 
 import database
 
@@ -16,6 +17,36 @@ app = FastAPI(title="Food Court Customer Portal")
 # Configure the directory for Jinja2 HTML templates
 templates = Jinja2Templates(directory="templates")
 
+# ==========================================
+# WebSocket Connection Manager (เพิ่มส่วนนี้)
+# ==========================================
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+
+    async def send_personal_message(self, message: str, websocket: WebSocket):
+        await websocket.send_text(message)
+
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except Exception:
+                pass
+
+# ต้องประกาศตัวแปร manager "หลังจาก" สร้าง Class ด้านบนเสร็จแล้ว
+manager = ConnectionManager()
+
+# ==========================================
+# API Endpoints
+# ==========================================
 @app.get("/wallet", response_class=HTMLResponse)
 async def check_wallet(request: Request, t: str = None, s: str = None):
     """
@@ -45,15 +76,11 @@ async def check_wallet(request: Request, t: str = None, s: str = None):
                 "message": "Wallet not found or is not registered in the system."
             }
         )
-        
-    # 3. Security Check Placeholder
-    # In a production environment, the HMAC signature (s) should be verified here 
-    # using the TokenSecurity logic to prevent URL guessing.
 
-    # 4. Fetch transaction history specific to this token session only
+    # 3. Fetch transaction history specific to this token session only
     transactions = database.get_recent_transactions(limit=10, token_uuid=t)
 
-    # 5. Render the HTML template with the retrieved data
+    # 4. Render the HTML template with the retrieved data
     return templates.TemplateResponse(
         request=request,
         name="wallet.html",
