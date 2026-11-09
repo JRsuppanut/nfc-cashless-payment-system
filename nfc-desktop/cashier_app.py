@@ -510,8 +510,8 @@ class CashierStore:
                     if not old_balance.is_finite() or old_balance < 0:
                         raise CashierError("INVALID_BALANCE")
                     carry_balance += old_balance
-                    if old["status"] not in ("ACTIVE", "AVAILABLE") or (
-                        old["status"] == "AVAILABLE" and old_balance != 0
+                    if old["status"] not in ("ACTIVE", "AVAILABLE", "REPLACED") or (
+                        old["status"] in ("AVAILABLE", "REPLACED") and old_balance != 0
                     ):
                         keep_suspended = True
 
