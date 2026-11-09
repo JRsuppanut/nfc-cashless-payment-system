@@ -18,7 +18,7 @@ from token_security import TokenSecurity
 
 # Override these settings through environment variables when needed.
 DEFAULT_PORT = os.environ.get("NFC_PORT", "COM4")
-BASE_URL = os.environ.get("FOODCOURT_BASE_URL", "http://10.59.30.226:8000").rstrip("/")
+BASE_URL = os.environ.get("FOODCOURT_BASE_URL", "http://192.168.1.59:8000").rstrip("/")
 
 # Start at the user-memory area and limit access to 144 bytes.
 # This range fits NTAG213 and can also be used with NTAG215/216.

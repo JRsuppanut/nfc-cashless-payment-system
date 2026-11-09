@@ -64,6 +64,7 @@ class TokenSecurity:
         token_uuid_str = str(uuid.UUID(bytes=token_uuid_bytes))
         return True, token_uuid_str, "TOKEN_VERIFIED"
 
+
     @classmethod
     def sign_url_token(cls, uid_bytes: bytes, token: str) -> str:
         """Return the HMAC signature as 32 hexadecimal characters.

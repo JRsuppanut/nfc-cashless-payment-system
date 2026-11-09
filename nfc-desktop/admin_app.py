@@ -1,7 +1,5 @@
 """Manage food court terminals and view daily sales."""
 
-import os
-import secrets
 import sys
 from html import escape
 
@@ -10,7 +8,7 @@ from PyQt6.QtCore import QDate, QLocale, Qt
 from PyQt6.QtGui import QColor, QTextCursor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDateEdit, QDialog,
-    QDialogButtonBox, QFormLayout, QHeaderView, QHBoxLayout, QInputDialog,
+    QDialogButtonBox, QFormLayout, QHeaderView, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QPushButton, QTextBrowser,
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
@@ -279,22 +277,7 @@ class AdminWindow(QWidget):
 def main():
     app = QApplication(sys.argv)
 
-    # Read the administrator password from the launch environment.
-    password = os.getenv("FOODCOURT_ADMIN_PASSWORD", "")
-    if not password:
-        QMessageBox.warning(None, "Food Court Admin", "ตั้ง FOODCOURT_ADMIN_PASSWORD ก่อนเปิด Admin")
-        return 1
-
-    entered, accepted = QInputDialog.getText(
-        None, "Food Court Admin", "รหัสผ่านผู้ดูแล", QLineEdit.EchoMode.Password
-    )
-    if not accepted:
-        return 0
-    if not secrets.compare_digest(entered.encode("utf-8"), password.encode("utf-8")):
-        QMessageBox.warning(None, "Food Court Admin", "รหัสผ่านไม่ถูกต้อง")
-        return 1
-
-    # Initialize the registry after administrator sign-in succeeds.
+    # Initialize the registry immediately without password check
     try:
         registry.initialize()
     except psycopg2.Error:
