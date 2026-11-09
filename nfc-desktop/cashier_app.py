@@ -1105,7 +1105,7 @@ class CashierApp(QMainWindow):
         left, box = panel()
         box.addWidget(label("Set Up a New Card", "section"))
         box.addWidget(label(
-            "ออกบัตรใหม่หรือเปิดใช้บัตรหมุนเวียนที่รับคืนแล้ว",
+            "แตะบัตรบนเครื่องอ่าน ระบบจะลงทะเบียนให้อัตโนมัติ",
             "muted",
         ))
         self.issue_heading = label("Ready for a New Card", "cardHeading")
@@ -1122,9 +1122,9 @@ class CashierApp(QMainWindow):
         steps.addWidget(label("How to Set Up a Card", "section"))
         steps.addWidget(label("1  Place card on reader", "cardHeading"))
         steps.addWidget(label("วางบัตรบนเครื่องอ่าน", "muted"))
-        steps.addWidget(label("2  Review card status", "cardHeading"))
-        steps.addWidget(label("ตรวจสอบว่าเป็นบัตรใหม่หรือบัตรที่รับคืนแล้ว", "muted"))
-        steps.addWidget(label("3  Confirm and keep card in place", "cardHeading"))
+        steps.addWidget(label("2  Automatic card registration", "cardHeading"))
+        steps.addWidget(label("ระบบจะสร้างบัญชีและเขียนข้อมูลลงบัตรให้อัตโนมัติ", "muted"))
+        steps.addWidget(label("3  Wait for success", "cardHeading"))
         steps.addWidget(label("วางบัตรไว้จนระบบแจ้งว่าออกบัตรสำเร็จ", "muted"))
         steps.addStretch()
 
@@ -1136,9 +1136,10 @@ class CashierApp(QMainWindow):
             self._action_buttons(
                 "Confirm and Set Up Card",
                 self._issue,
-                "วางบัตรไว้จนรายการสำเร็จ",
+                "วางบัตรไว้ ระบบจะลงทะเบียนให้ทันทีโดยไม่ต้องกดยืนยัน",
             )
         )
+        self.issue_confirm.hide()
 
     # Build amount entry, preset amounts, and the top-up preview.
     def _build_topup(self):
@@ -1691,98 +1692,114 @@ class CashierApp(QMainWindow):
         generation, uid, mode = self.epoch, self.uid, self.mode
         self.pending = None
         self.wallet = None
-<<<<<<< HEAD
-
-        uid, token, mode = self.uid, self.token, self.mode
         self._details()
 
-        for item in (
-            self.issue_card, self.topup_card, self.return_card,
-        ):
+        for item in (self.issue_card, self.topup_card, self.return_card):
             item.setText(f"Card ID: {uid}")
 
-        if not self.valid or not token:
-            if mode != self.MODE_ISSUE and self.card_status != "FOREIGN_OR_UNINITIALIZED_CARD":
-                self.issue_status.setText("Card Status: Verification Failed")
-                set_banner(self.notice, "error",
-                    "Card Verification Failed • ไม่อนุญาตให้ทำรายการกับบัตรนี้"
-                )
-                return
+        set_banner(
+            self.notice,
+            "info",
+            "Checking Card • กำลังตรวจสอบบัตร กรุณาวางบัตรไว้",
+        )
 
-            set_banner(self.notice, "info", "Checking Card Registration… • กำลังตรวจสอบบัตร")
-
-            def unregistered_done(latest):
-                if generation != self.epoch or not self._can_read():
-                    return
-                if latest and not (
-                    latest.get("status") == "AVAILABLE"
-                    and Decimal(str(latest.get("balance", 0))) == 0
-                ):
-                    self.issue_status.setText("Card Status: Existing record requires review")
-                    set_banner(self.notice, "error",
-                        "Card Cannot Be Re-Issued • พบข้อมูลบัตรเดิมที่ไม่พร้อมลงทะเบียน "
-                        "กรุณาให้ผู้ดูแลตรวจสอบ ห้ามออกบัตรซ้ำ"
-                    )
-                    return
-                if mode == self.MODE_ISSUE:
-                    self.issue_heading.setText("Ready for a New Card")
-                    self.issue_status.setText(
-                        "Card Status: Returned / Ready for setup" if latest
-                        else "Card Status: New / Not registered"
-                    )
-                    self.issue_confirm.setEnabled(True)
-                    set_banner(self.notice, "info",
-                        "Ready for a New Card • ตรวจสอบแล้วกดยืนยัน "
-                        "และวางบัตรไว้จนเขียนข้อมูลสำเร็จ"
-                    )
-                else:
-                    set_banner(self.notice, "error",
-                        "Card Not Registered • บัตรนี้ยังไม่มีรอบการใช้งาน "
-                        "ให้ไปที่ Set Up a New Card ก่อน"
-                    )
-
-            self._job(lambda: self.store.latest_wallet(uid), unregistered_done, failed=lambda: self._db_failed())
-            return
-
-        set_banner(self.notice, "info", "Checking Card… • กำลังตรวจสอบข้อมูลบัตร")
-
-        def done(wallet):
-=======
-        set_banner(self.notice, "warning", "Checking Card • กำลังตรวจสอบบัตร กรุณาวางบัตรไว้")
         def read():
             snapshot = self.worker.read_current_card(uid)
             card_uid, valid, token, status = snapshot
-            row = self.store.wallet(token) if valid else self.store.latest_wallet(card_uid)
+            row = (
+                self.store.wallet(token)
+                if valid and token
+                else self.store.latest_wallet(card_uid)
+            )
             return snapshot, row
+
         def done(result):
             # Ignore a response if the card was removed, replaced, or the selected mode changed.
->>>>>>> parent of ad68f0d (ks)
             if generation != self.epoch or not self._can_read():
                 return
+
             snapshot, row = result
             self.uid, self.valid, self.token, self.card_status = snapshot
-            for item in (self.issue_card, self.topup_card, self.return_card):
-                item.setText(f"Card ID: {uid}")
             self._details()
+
             if not self.valid:
-                # Unsigned legacy cards are only eligible for setup after checking their database state.
-                allowed_type = self.card_status in ("FOREIGN_OR_UNINITIALIZED_CARD", "LEGACY_UNSIGNED_CARD")
-                available = row is None or (row.get("status") == "AVAILABLE" and Decimal(str(row.get("balance",0))) == 0)
+                # Only blank cards and legacy cards from this system may be provisioned automatically.
+                allowed_type = self.card_status in (
+                    "FOREIGN_OR_UNINITIALIZED_CARD",
+                    "LEGACY_UNSIGNED_CARD",
+                )
+                available = row is None or (
+                    row.get("status") == "AVAILABLE"
+                    and Decimal(str(row.get("balance", 0))) == 0
+                )
+
                 if mode == self.MODE_ISSUE and allowed_type and available:
-                    self.issue_status.setText("Card Status: Ready for setup")
-                    self.issue_confirm.setEnabled(True)
-                    set_banner(self.notice, "warning", "Ready for Setup • ตรวจสอบบัตรแล้ว กดยืนยันเพื่อออกบัตร")
+                    self.issue_heading.setText("Registering Card...")
+                    self.issue_status.setText("Card Status: Registering automatically")
+                    set_banner(
+                        self.notice,
+                        "warning",
+                        "Registering New Card • กำลังลงทะเบียนและเขียนข้อมูลลงบัตรอัตโนมัติ กรุณาวางบัตรไว้",
+                    )
+                    self._start_request(
+                        "ISSUE",
+                        uid,
+                        str(uuid.uuid4()),
+                        previous_token=self.token,
+                    )
+                    return
+
+                self.issue_status.setText(f"Card Status: {self.card_status or 'Verification Failed'}")
+                if not allowed_type:
+                    messages = {
+                        "FOREIGN_URL": "บัตรนี้มีข้อมูลจากระบบอื่น ไม่สามารถลงทะเบียนทับได้",
+                        "SIGNATURE_VERIFICATION_FAILED": "ตรวจสอบลายเซ็นบัตรไม่ผ่าน กรุณาตรวจสอบบัตร",
+                        "INVALID_CARD_DATA": "อ่านข้อมูลบนบัตรไม่ถูกต้อง กรุณาใช้บัตรที่ว่างหรือบัตรของระบบนี้",
+                        "UNSUPPORTED_TAG": "บัตรชนิดนี้ไม่รองรับ กรุณาใช้บัตร NTAG ที่ระบบรองรับ",
+                    }
+                    message = messages.get(
+                        self.card_status,
+                        "ไม่สามารถตรวจสอบบัตรนี้ได้ กรุณาใช้บัตรใหม่หรือบัตรที่คืนจากระบบนี้",
+                    )
+                elif not available:
+                    message = "บัตรนี้ยังมีรอบใช้งานหรือยอดเงินคงเหลือ กรุณาคืนบัตรก่อนนำกลับมาใช้ใหม่"
                 else:
-                    self.issue_status.setText("Card Status: Cannot Use")
-                    set_banner(self.notice, "error", "บัตรนี้ยังใช้ทำรายการไม่ได้ กรุณาให้ผู้ดูแลตรวจสอบ")
+                    message = "บัตรยังไม่ได้ลงทะเบียน กรุณาเลือก Set Up a New Card"
+                set_banner(self.notice, "error", message)
                 return
+
             if not row or row.get("card_uid") != uid:
-                set_banner(self.notice, "error", "ไม่พบข้อมูลที่ตรงกับบัตร กรุณาให้ผู้ดูแลตรวจสอบ")
+                set_banner(
+                    self.notice,
+                    "error",
+                    "ไม่พบข้อมูลกระเป๋าเงินที่ตรงกับบัตร กรุณาตรวจสอบรายการเดิมก่อน",
+                )
                 return
+
+            if mode == self.MODE_ISSUE:
+                available = (
+                    row.get("status") == "AVAILABLE"
+                    and Decimal(str(row.get("balance", 0))) == 0
+                )
+                if available:
+                    self.issue_heading.setText("Registering Card...")
+                    self.issue_status.setText("Card Status: Registering automatically")
+                    set_banner(
+                        self.notice,
+                        "warning",
+                        "Registering Returned Card • กำลังเปิดรอบใช้งานใหม่อัตโนมัติ กรุณาวางบัตรไว้",
+                    )
+                    self._start_request(
+                        "ISSUE",
+                        uid,
+                        str(uuid.uuid4()),
+                        previous_token=self.token,
+                    )
+                    return
+
             self.wallet = row
             self._display_wallet(row)
-            if mode == self.MODE_ISSUE and self.issue_confirm.isEnabled():
-                set_banner(self.notice, "warning", "Ready for Setup • กดยืนยันเพื่อออกบัตรให้ลูกค้ารายใหม่")
+
         def failed():
             if generation != self.epoch:
                 return
@@ -1792,28 +1809,35 @@ class CashierApp(QMainWindow):
             else:
                 self.pending = None
                 self._disable_actions()
-                set_banner(self.notice, "error", "อ่านบัตรไม่สำเร็จ กรุณาวางบัตรให้ตรงเครื่องอ่านแล้วลองใหม่")
+                set_banner(
+                    self.notice,
+                    "error",
+                    "อ่านบัตรไม่สำเร็จ กรุณาวางบัตรให้ตรงเครื่องอ่านแล้วลองใหม่",
+                )
+
         self._job(read, done, failed)
 
 
     # Render a validated wallet and enable only the actions allowed by its current status.
     def _display_wallet(self, wallet):
         if self.mode == self.MODE_ISSUE:
-            allowed = not wallet or (
-                wallet.get("status") == "AVAILABLE"
-                and Decimal(str(wallet.get("balance", 0))) == 0
-            )
-            self.issue_confirm.setEnabled(allowed)
+            state = wallet.get("status", "")
+            balance = Decimal(str(wallet.get("balance", 0)))
+            available = state == "AVAILABLE" and balance == 0
+            self.issue_confirm.setEnabled(False)
             self.issue_status.setText(
-                "Card Status: Returned / Ready for setup" if allowed
-                else "Card Status: Active"
+                "Card Status: Returned / Ready for setup" if available
+                else "Card Status: Active" if state == "ACTIVE"
+                else "Card Status: Not Available"
             )
             set_banner(
                 self.notice,
-                "info" if allowed else "error",
-                "Ready for a New Card • วางบัตรไว้จนรายการสำเร็จ"
-                if allowed else
-                "Card Already Active • บัตรนี้ยังใช้งานอยู่ ต้องคืนบัตรก่อนออกบัตรรอบใหม่",
+                "info" if available else "error",
+                "Returned Card • บัตรพร้อมเปิดรอบใช้งานใหม่"
+                if available else
+                "Card Already Active • บัตรนี้ยังใช้งานอยู่ ต้องคืนบัตรก่อนนำกลับมาใช้ใหม่"
+                if state == "ACTIVE" else
+                "Card Not Available • บัตรนี้ยังมียอดเงินหรือไม่พร้อมใช้งาน",
             )
             return
 
