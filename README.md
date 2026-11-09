@@ -139,4 +139,4 @@ python stall_pos_app.py
 
 * **`PN53x board not found`**: Validate the crossed UART wiring (TX to RX, RX to TX) and ensure both DIP switches on the PN532 module are set to the `0` (OFF) position.
 
-* **Card Data Cannot Be Verified**: The business logic intentionally blocks duplicate active card registrations. Clear the respective row in the PostgreSQL database before re-registering an existing UID.
+* **Card Registration**: On the Cashier `Set Up a New Card` page, place a supported blank NTAG card or a returned card with a zero balance on the reader. The cashier automatically writes and verifies a new signed token, then creates a new wallet usage cycle. Active cards, cards with a remaining balance, unsupported tags, and cards with invalid or foreign data are rejected; do not delete wallet rows manually to re-register a card.
