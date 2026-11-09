@@ -15,7 +15,7 @@ DB_CONFIG = {
     "dbname": os.getenv("FOODCOURT_DB_NAME", "foodcourt_db"),
     "user": os.getenv("FOODCOURT_DB_USER", "postgres"),
     "password": os.getenv("FOODCOURT_DB_PASSWORD", ""),
-    "host": os.getenv("FOODCOURT_DB_HOST", "192.168.1.59"),
+    "host": os.getenv("FOODCOURT_DB_HOST", "127.0.0.1"),
     "port": os.getenv("FOODCOURT_DB_PORT", "5432"),
 }
 
