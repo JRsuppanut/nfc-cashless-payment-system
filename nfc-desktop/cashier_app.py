@@ -445,14 +445,10 @@ class CashierStore:
                 if c.fetchone():
                     raise CashierError("PENDING_OPERATION_EXISTS")
                 if kind == "ISSUE":
-                    c.execute("SELECT 1 FROM wallets WHERE card_uid=%s AND status='ACTIVE' LIMIT 1", (uid,))
-                    if c.fetchone():
-                        raise CashierError("CARD_ALREADY_ACTIVE")
-                    c.execute("""SELECT balance,status FROM wallets WHERE card_uid=%s
-                        ORDER BY created_at DESC,updated_at DESC LIMIT 1 FOR UPDATE""", (uid,))
-                    old = c.fetchone()
-                    if old and (old["status"] != "AVAILABLE" or Decimal(str(old["balance"])) != 0):
-                        raise CashierError("CARD_NOT_AVAILABLE")
+                    # Lock all old usage cycles; finish_issue() replaces them atomically.
+                    c.execute("""SELECT token_uuid FROM wallets WHERE card_uid=%s
+                        ORDER BY created_at,token_uuid FOR UPDATE""", (uid,))
+                    c.fetchall()
                 c.execute("""INSERT INTO cashier_ui_operations
                     (operation_id,kind,token_uuid,card_uid,amount,terminal_id,previous_token,stage)
                     VALUES(%s,%s,%s,%s,%s,%s,%s,'PREPARED') RETURNING *""",
@@ -490,7 +486,7 @@ class CashierStore:
             updated_at=CURRENT_TIMESTAMP WHERE operation_id=%s""", (Json(result), op["operation_id"]))
         return result
 
-    # Register the verified new token and its setup ledger entry exactly once per request.
+    # Atomically retire every older token and move its remaining value to the new token.
     def finish_issue(self, operation_id, uid, token):
         with self.connection() as conn:
             with conn.cursor(cursor_factory=DictCursor) as c:
@@ -500,26 +496,67 @@ class CashierStore:
                     raise CashierError("OPERATION_NOT_FOUND")
                 if op["kind"] != "ISSUE" or op["card_uid"] != uid or op["token_uuid"] != token:
                     raise CashierError("OPERATION_REQUEST_MISMATCH")
-                # DONE can contain success or a known rejection. Never apply the balance change again.
                 if op["state"] in ("DONE", "CANCELLED"):
                     return dict(op["result"] or {"success":False,"reason":"OPERATION_CANCELLED"})
-                c.execute("SELECT 1 FROM wallets WHERE card_uid=%s AND status='ACTIVE' AND token_uuid<>%s", (uid, token))
-                if c.fetchone():
-                    raise CashierError("CARD_ALREADY_ACTIVE")
+
+                c.execute("""SELECT * FROM wallets WHERE card_uid=%s
+                    ORDER BY created_at,token_uuid FOR UPDATE""", (uid,))
+                old_wallets = [dict(row) for row in c.fetchall() if row["token_uuid"] != token]
+
+                carry_balance = Decimal("0.00")
+                keep_suspended = False
+                for old in old_wallets:
+                    old_balance = Decimal(str(old["balance"]))
+                    if not old_balance.is_finite() or old_balance < 0:
+                        raise CashierError("INVALID_BALANCE")
+                    carry_balance += old_balance
+                    if old["status"] not in ("ACTIVE", "AVAILABLE") or (
+                        old["status"] == "AVAILABLE" and old_balance != 0
+                    ):
+                        keep_suspended = True
+
+                if carry_balance > Decimal("99999999.99"):
+                    raise CashierError("BALANCE_LIMIT")
+
+                # Preserve account holds: replacing the NFC token must not unsuspend a wallet.
+                new_status = "SUSPENDED" if keep_suspended else "ACTIVE"
+
+                c.execute("""UPDATE wallets SET balance=0,status='REPLACED',
+                    updated_at=CURRENT_TIMESTAMP WHERE card_uid=%s AND token_uuid<>%s""",
+                    (uid, token))
+
                 c.execute("""INSERT INTO wallets(token_uuid,card_uid,balance,status,created_at,updated_at)
-                    VALUES(%s,%s,0,'ACTIVE',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
-                    ON CONFLICT(token_uuid) DO NOTHING""", (token, uid))
+                    VALUES(%s,%s,%s,%s,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+                    ON CONFLICT(token_uuid) DO NOTHING""",
+                    (token, uid, carry_balance, new_status))
                 c.execute("SELECT * FROM wallets WHERE token_uuid=%s FOR UPDATE", (token,))
                 row = c.fetchone()
-                if not row or row["card_uid"] != uid or row["status"] != "ACTIVE" or row["balance"] != 0:
+                if (
+                    not row or row["card_uid"] != uid or row["status"] != new_status
+                    or Decimal(str(row["balance"])) != carry_balance
+                ):
                     raise CashierError("WALLET_REGISTRATION_FAILED")
-                c.execute("""INSERT INTO transaction_ledger(token_uuid,card_uid,terminal_type,terminal_id,
-                    action_type,amount,balance_after,timestamp)
-                    VALUES(%s,%s,'CASHIER',%s,'SETUP_CARD',0,0,CURRENT_TIMESTAMP)""",
-                    (token, uid, self.terminal_id))
+
+                for old in old_wallets:
+                    old_balance = Decimal(str(old["balance"]))
+                    if old_balance > 0:
+                        c.execute("""INSERT INTO transaction_ledger(
+                            token_uuid,card_uid,terminal_type,terminal_id,action_type,
+                            amount,balance_after,timestamp)
+                            VALUES(%s,%s,'CASHIER',%s,'CARD_REISSUE_OUT',%s,0,CURRENT_TIMESTAMP)""",
+                            (old["token_uuid"], uid, self.terminal_id, old_balance))
+
+                action = "CARD_REISSUE_IN" if carry_balance > 0 else "SETUP_CARD"
+                c.execute("""INSERT INTO transaction_ledger(
+                    token_uuid,card_uid,terminal_type,terminal_id,action_type,
+                    amount,balance_after,timestamp)
+                    VALUES(%s,%s,'CASHIER',%s,%s,%s,%s,CURRENT_TIMESTAMP)""",
+                    (token, uid, self.terminal_id, action, carry_balance, carry_balance))
+
                 return self._save_result(c, op, {
                     "success":True,"kind":"ISSUE","token":token,"uid":uid,
-                    "balance":"0.00","amount":"0.00","status":"ACTIVE"})
+                    "balance":str(carry_balance),"amount":str(carry_balance),
+                    "status":new_status,"reissued":bool(old_wallets)})
 
     # Apply one prepared top-up/return, or return its saved result when retried.
     def execute_financial(self, operation_id):
@@ -1681,14 +1718,13 @@ class CashierApp(QMainWindow):
             set_banner(self.notice, "success", "Card Read Successfully • นำบัตรออกแล้ว ยอดที่แสดงเป็นยอดเมื่ออ่านล่าสุด")
 
 
-    # Read the physical card and automatically provision blank or safely returned cards.
+    # Read any supported NTAG card and automatically replace its token in Set Up mode.
     def _reload_card(self):
         self._disable_actions()
         if not self._can_read():
             self._idle_notice()
             return
         self.epoch += 1
-        # Ignore stale reads after card removal, replacement, or mode changes.
         generation, uid, mode = self.epoch, self.uid, self.mode
         self.pending = None
         self.wallet = None
@@ -1697,7 +1733,10 @@ class CashierApp(QMainWindow):
         def read():
             snapshot = self.worker.read_current_card(uid)
             card_uid, valid, token, status = snapshot
-            row = self.store.wallet(token) if valid and token else self.store.latest_wallet(card_uid)
+            if mode == self.MODE_ISSUE:
+                row = self.store.latest_wallet(card_uid)
+            else:
+                row = self.store.wallet(token) if valid and token else self.store.latest_wallet(card_uid)
             return snapshot, row
 
         def done(result):
@@ -1709,33 +1748,32 @@ class CashierApp(QMainWindow):
                 item.setText(f"Card ID: {uid}")
             self._details()
 
-            if not self.valid:
-                allowed_type = self.card_status in (
-                    "FOREIGN_OR_UNINITIALIZED_CARD", "LEGACY_UNSIGNED_CARD"
-                )
-                available = row is None or (
-                    row.get("status") == "AVAILABLE"
-                    and Decimal(str(row.get("balance", 0))) == 0
-                )
-                if mode == self.MODE_ISSUE and allowed_type and available:
-                    self.issue_heading.setText("Registering Card...")
-                    self.issue_status.setText("Card Status: Registering automatically")
+            if mode == self.MODE_ISSUE:
+                if self.card_status == "UNSUPPORTED_TAG":
+                    self.issue_status.setText("Card Status: Unsupported Tag")
                     set_banner(
-                        self.notice, "warning",
-                        "Registering New Card • กำลังลงทะเบียนบัตรอัตโนมัติ กรุณาวางบัตรไว้",
+                        self.notice, "error",
+                        "บัตรชนิดนี้ไม่รองรับ ต้องใช้ NTAG213/215/216 ที่เขียนข้อมูลได้",
                     )
-                    self._start_request(
-                        "ISSUE", uid, str(uuid.uuid4()), previous_token=self.token
-                    )
-                else:
-                    self.issue_status.setText("Card Status: Cannot Use")
-                    if not allowed_type:
-                        message = "บัตรนี้ไม่ใช่บัตรว่างหรือบัตรของระบบนี้ ไม่สามารถลงทะเบียนทับได้"
-                    elif not available:
-                        message = "บัตรนี้ยังมียอดเงินหรือรอบใช้งานเดิม กรุณาคืนบัตรให้เรียบร้อยก่อน"
-                    else:
-                        message = "บัตรนี้ยังไม่พร้อมใช้งาน กรุณาให้ผู้ดูแลตรวจสอบ"
-                    set_banner(self.notice, "error", message)
+                    return
+
+                self.issue_heading.setText("Registering Card...")
+                self.issue_status.setText("Card Status: Replacing previous registration")
+                set_banner(
+                    self.notice, "warning",
+                    "Registering Card • กำลังเขียน Token ใหม่และย้ายยอดเดิม กรุณาวางบัตรไว้",
+                )
+                self._start_request(
+                    "ISSUE", uid, str(uuid.uuid4()), previous_token=self.token
+                )
+                return
+
+            if not self.valid:
+                self.issue_status.setText("Card Status: Cannot Use")
+                set_banner(
+                    self.notice, "error",
+                    "Token ของบัตรไม่ถูกต้อง กรุณาไปที่ Set Up a New Card เพื่อเขียนทับ",
+                )
                 return
 
             if not row or row.get("card_uid") != uid:
@@ -1743,30 +1781,6 @@ class CashierApp(QMainWindow):
                 return
 
             self.wallet = row
-            if mode == self.MODE_ISSUE:
-                available = (
-                    row.get("status") == "AVAILABLE"
-                    and Decimal(str(row.get("balance", 0))) == 0
-                )
-                if available:
-                    self.issue_heading.setText("Registering Card...")
-                    self.issue_status.setText("Card Status: Registering automatically")
-                    set_banner(
-                        self.notice, "warning",
-                        "Registering Returned Card • กำลังเปิดรอบใช้งานใหม่ กรุณาวางบัตรไว้",
-                    )
-                    self._start_request(
-                        "ISSUE", uid, str(uuid.uuid4()), previous_token=self.token
-                    )
-                else:
-                    self.issue_heading.setText("Card Cannot Be Set Up")
-                    self.issue_status.setText(f"Card Status: {row.get('status', 'Unavailable')}")
-                    set_banner(
-                        self.notice, "error",
-                        "บัตรนี้ยังใช้งานอยู่หรือมียอดเงินคงเหลือ ไม่สามารถลงทะเบียนซ้ำได้",
-                    )
-                return
-
             self._display_wallet(row)
 
         def failed():
@@ -1779,31 +1793,40 @@ class CashierApp(QMainWindow):
                 self._disable_actions()
                 set_banner(
                     self.notice, "error",
-                    "อ่านบัตรไม่สำเร็จ กรุณาวางบัตรให้ตรงเครื่องอ่านแล้วลองใหม่",
+                    "อ่านบัตรไม่ได้หรือบัตรไม่รองรับ กรุณาตรวจสอบชนิด NTAG และวางบัตรให้ตรงเครื่องอ่าน",
                 )
 
         self._job(read, done, failed)
 
 
-    # Render a validated wallet and enable only the actions allowed by its current status.
+    # Render wallet details, but never permit spending from a suspended/replaced cycle.
     def _display_wallet(self, wallet):
-        # 1. บังคับซ่อนแถบเตือนแจ้งเตือนสีแดงกวนใจทุกกรณี
-        self.notice.hide()
-        
-        from decimal import Decimal
         balance = Decimal(str(wallet.get("balance", 0))) if wallet else Decimal(0)
-        
-        # Set Up is automatic; only returned zero-balance cards may start a new cycle.
+        state = wallet.get("status", "UNAVAILABLE")
+
         if self.mode == self.MODE_ISSUE:
-            available = (
-                wallet.get("status") == "AVAILABLE"
-                and balance == 0
-            )
-            self.issue_status.setText(
-                "Card Status: Returned / Ready" if available
-                else f"Card Status: {wallet.get('status', 'Unavailable')}"
-            )
+            self.issue_status.setText(f"Card Status: {state}")
             self.issue_confirm.setEnabled(False)
+            return
+
+        if state != "ACTIVE":
+            self.topup_confirm.setEnabled(False)
+            self.return_confirm.setEnabled(False)
+            if self.mode == self.MODE_CHECK:
+                self.checked_uid = self.uid
+                self.checked_token = self.token
+                self.check_card.setText(f"Card ID: {self.uid}")
+                self.check_balance.setText(f"฿{balance:,.2f}")
+                self.check_status.setText(f"Card Status: {state}")
+                self.card_history.setEnabled(True)
+            elif self.mode == self.MODE_TOPUP:
+                self.topup_status.setText(f"Card Status: {state}")
+            elif self.mode == self.MODE_RETURN:
+                self.return_status.setText(f"Card Status: {state}")
+            set_banner(
+                self.notice, "error",
+                "บัตรนี้ถูกระงับหรือเป็น Token รอบเก่า ไม่อนุญาตให้เติมเงินหรือชำระเงิน",
+            )
             return
 
         # 3. โหมดตรวจสอบบัตร (Check Card Balance)
@@ -2081,6 +2104,8 @@ class CashierApp(QMainWindow):
                 action = record.get("action_type", "")
                 action_text = {
                     "SETUP_CARD": "ออกบัตร / เปิดรอบใหม่",
+                    "CARD_REISSUE_OUT": "ย้ายยอดจาก Token เก่า",
+                    "CARD_REISSUE_IN": "รับยอดจาก Token เดิม",
                     "TOP_UP": "เติมเงิน",
                     "PAY": "ชำระค่าอาหาร",
                     "REFUND_MEAL": "คืนเงินค่าอาหารเข้าบัตร",
@@ -2096,9 +2121,9 @@ class CashierApp(QMainWindow):
 
                 amount = Decimal(str(record.get("amount", 0)))
 
-                if action in ("TOP_UP", "REFUND_MEAL"):
+                if action in ("TOP_UP", "REFUND_MEAL", "CARD_REISSUE_IN"):
                     prefix = "+"
-                elif action in ("PAY", "REFUND_RETURN"):
+                elif action in ("PAY", "REFUND_RETURN", "CARD_REISSUE_OUT"):
                     prefix = "−"
                 else:
                     prefix = ""
@@ -2330,15 +2355,28 @@ class CashierApp(QMainWindow):
         token = result.get("token") or request.get("token_uuid")
         self._clear_operation()
         if kind == "ISSUE":
-            # Successful setup may proceed directly to Top Up while the same card stays on the reader.
             self.blocked_uid = None
             self.issue_card.setText(f"Card ID: {uid}")
-            self.issue_status.setText("Card Status: Active")
-            self.issue_heading.setText("Card Setup Successful")
+            new_status = result.get("status", "ACTIVE")
+            new_balance = result.get("balance", "0.00")
+            self.issue_balance.setText(f"Starting Balance: {money(new_balance)}")
+            self.issue_status.setText(f"Card Status: {new_status}")
+            self.issue_heading.setText(
+                "Card Re-registration Successful"
+                if result.get("reissued") else "Card Setup Successful"
+            )
             if self.uid == uid:
                 self.token, self.valid, self.card_status = token, True, "TOKEN_VERIFIED"
-            set_banner(self.notice,"success",
-                "Card Setup Successful • ออกบัตรสำเร็จ เลือก Add Money to Card เพื่อเติมเงินต่อได้โดยไม่ต้องยกบัตรออก")
+            if new_status == "ACTIVE":
+                set_banner(
+                    self.notice, "success",
+                    f"Card Registration Successful • ลงทะเบียน Token ใหม่สำเร็จ ยอดคงเหลือ {money(new_balance)}",
+                )
+            else:
+                set_banner(
+                    self.notice, "warning",
+                    f"เขียน Token ใหม่แล้วและรักษายอด {money(new_balance)} ไว้ แต่บัญชีเดิมถูกระงับ จึงยังใช้จ่ายไม่ได้",
+                )
         elif kind == "TOP_UP":
             # After a financial success, require a new interaction before another request for that card.
             self.blocked_uid = uid
