@@ -17,6 +17,7 @@ from contextlib import contextmanager
 
 import psycopg2
 import database
+import terminal_registry
 from psycopg2.extras import RealDictCursor, Json
 from nfc_worker import NFCWorker, DEFAULT_PORT
 
@@ -36,7 +37,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QSizePolicy, QFileDialog, QTextBrowser,
 )
 
-STALL = os.getenv('STALL_ID', 'STALL-01')
+STALL = terminal_registry.terminal_id('stall')
 MAX = Decimal('99999999.99')
 IMAGE_UNCHANGED = object()
 
@@ -399,7 +400,7 @@ class Store:
         # Provision a missing configured stall without renaming existing data.
         with self.tx() as c:
             name = os.getenv('STALL_NAME', '').strip()[:100]
-            if name:
+            if name and not terminal_registry.profile('stall'):
                 c.execute(
                     'INSERT INTO stalls(stall_id,stall_name,is_active,created_at,updated_at) '
                     'VALUES(%s,%s,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP) ON CONFLICT DO NOTHING',
@@ -443,6 +444,10 @@ class Store:
                 id SERIAL PRIMARY KEY, order_id TEXT NOT NULL REFERENCES stall_ui_orders(id),
                 uid TEXT NOT NULL, kind TEXT NOT NULL, amount NUMERIC(10,2) NOT NULL,
                 balance NUMERIC(10,2) NOT NULL, created TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
+            
+            c.execute('ALTER TABLE transaction_ledger ADD COLUMN IF NOT EXISTS terminal_id TEXT')
+            c.execute('ALTER TABLE transaction_ledger ADD COLUMN IF NOT EXISTS stall_order_id TEXT')
+            
             c.execute('''CREATE UNIQUE INDEX IF NOT EXISTS stall_ui_queue_unique
                 ON stall_ui_orders(stall_id,queue_day,queue_no) WHERE queue_no IS NOT NULL''')
             c.execute('CREATE INDEX IF NOT EXISTS stall_ui_orders_by_stall ON stall_ui_orders(stall_id,created DESC)')
@@ -823,10 +828,13 @@ class Store:
 
             c.execute('UPDATE wallets SET balance=%s,updated_at=CURRENT_TIMESTAMP WHERE token_uuid=%s',
                       (balance, req['token']))
+            
             c.execute('''INSERT INTO transaction_ledger(
-                token_uuid,card_uid,terminal_type,action_type,amount,balance_after,timestamp)
-                VALUES(%s,%s,'STALL_POS',%s,%s,%s,CURRENT_TIMESTAMP)''',
-                (req['token'], req['uid'], kind, amount, balance))
+                token_uuid,card_uid,terminal_type,terminal_id,stall_order_id,
+                action_type,amount,balance_after,timestamp)
+                VALUES(%s,%s,'STALL_POS',%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)''',
+                (req['token'], req['uid'], STALL, o['id'], kind, amount, balance))
+            
             c.execute('INSERT INTO stall_ui_events(order_id,uid,kind,amount,balance) VALUES(%s,%s,%s,%s,%s)',
                       (o['id'], req['uid'], kind, amount, balance))
             result = dict(kind=kind, amount=str(amount), balance=str(balance), order=o['id'])
@@ -913,6 +921,10 @@ class Store:
                       (target, oid, STALL, expected, 'PAID'))
             if not c.fetchone():
                 raise BusinessError('คิวเปลี่ยนแล้ว หรือมีการคืนเงินค้างอยู่ กรุณารีเฟรช')
+
+    def sales_today(self):
+        rows = database.daily_sales(date.today(), STALL)
+        return rows[0]["net"] if rows else None
 
     def history(self, uid=None):
         with self.tx() as c:
@@ -1697,6 +1709,7 @@ class StallPOSApp(QMainWindow):
         self.bridge.removed.connect(self.removed)
         self.build()
         self.worker = NFCWorker(
+            port=terminal_registry.reader_port("stall", DEFAULT_PORT),
             on_tag_detected=self.bridge.tag.emit, on_tag_removed=self.bridge.removed.emit,
         )
         self.worker.start()
@@ -1998,6 +2011,10 @@ class StallPOSApp(QMainWindow):
         row.addWidget(button('ดูรายการทั้งหมด', self.all_history))
         row.addWidget(button('รีเฟรช', self.refresh_history))
         b.addLayout(row)
+        
+        self.history_sales = lab('ยอดขายสุทธิวันนี้ • —', 'title')
+        b.addWidget(self.history_sales)
+        
         self.history_label = lab('รายการของ '+STALL+' รวมออเดอร์เดิมที่นำเข้าประวัติ', 'muted')
         b.addWidget(self.history_label)
         self.history_filter = lab('ยังไม่ได้กรอง Card ID', 'instruction')
@@ -2546,8 +2563,21 @@ class StallPOSApp(QMainWindow):
             return
         uid = self.history_uid
 
-        def done(rows):
+        def fetch():
+            rows = self.db.history(uid)
+            sales_today = getattr(self.db, "sales_today", None)
+            try:
+                net = sales_today() if sales_today else None
+            except psycopg2.Error:
+                net = None
+            return rows, net
+
+        def done(result):
+            rows, net = result
+            amount = baht(net) if net is not None else '—'
+            self.history_sales.setText(f'ยอดขายสุทธิวันนี้ • {amount}')
             self.history_rows = rows
+            
             self.history_label.setText(
                 ('Card ID: '+uid+' • ' if uid else '')+'รายการของ '+STALL+' (ล่าสุดสูงสุด 300)'
             )
@@ -2568,7 +2598,7 @@ class StallPOSApp(QMainWindow):
                 self.history_table.item(index, 4).setForeground(color)
                 self.history_table.item(index, 5).setForeground(color)
 
-        self.run(lambda: self.db.history(uid), done)
+        self.run(fetch, done)
 
     def all_history(self):
         self.history_uid = None

@@ -1,2 +1,4 @@
 pyserial>=3.5
 adafruit-circuitpython-pn532>=2.3.0
+PyQt6
+psycopg2-binary

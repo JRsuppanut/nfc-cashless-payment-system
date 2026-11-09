@@ -7,7 +7,6 @@ operation ID; they are never inferred solely from card presence.
 
 # APPLICATION AND STANDARD LIBRARY IMPORTS
 import sys
-import os
 from contextlib import contextmanager
 import psycopg2
 import uuid
@@ -28,6 +27,7 @@ from psycopg2.extras import DictCursor, Json
 
 # Read database connection settings from the existing project module.
 import database
+import terminal_registry
 from nfc_worker import NFCWorker, DEFAULT_PORT
 
 
@@ -353,6 +353,7 @@ class CashierStore:
     def initialize(self):
         with self.connection() as conn:
             with conn.cursor() as c:
+                terminal_registry.require_cashier(c, self.terminal_id)
                 c.execute("""
                     CREATE TABLE IF NOT EXISTS wallets (
                         token_uuid TEXT PRIMARY KEY, card_uid TEXT NOT NULL,
@@ -859,8 +860,8 @@ class CashierApp(QMainWindow):
         self.operation_request = None
         self.jobs = set()
         self.compact = None
-        # This identifies a terminal; it is not a login or an authorization mechanism.
-        self.terminal_id = os.environ.get("CASHIER_ID", "CASHIER-01")
+        # Read the station assigned on this workstation.
+        self.terminal_id = terminal_registry.terminal_id("cashier")
         self.last_error = ""
         self.last_exception = None
         self.store = CashierStore(self.terminal_id)
@@ -873,6 +874,7 @@ class CashierApp(QMainWindow):
         self._build_ui()
 
         self.worker = NFCWorker(
+            port=terminal_registry.reader_port("cashier", DEFAULT_PORT),
             on_tag_detected=self.bridge.emit_tag,
             on_tag_removed=self.bridge.emit_removal,
         )
