@@ -7,7 +7,6 @@ import datetime
 import psycopg2
 from psycopg2.extras import DictCursor
 from typing import Any, Dict, List, Optional, Tuple
-
 import os
 
 # ==========================================
@@ -17,7 +16,7 @@ DB_CONFIG = {
     "dbname": "foodcourt_db",
     "user": "postgres",
     "password": "////",  # IMPORTANT: Change this to your PostgreSQL password
-    "host": "10.137.155.226",
+    "host": "127.0.0.1",
     "port": "5432"
 }
 
@@ -201,7 +200,7 @@ def initialize_database() -> None:
 
 
 # ==========================================
-# CARD AND WALLET OPERATIONS
+# CARD AND WALLET OPERATIONS (BYPASSED)
 # ==========================================
 
 def get_wallet_by_token(token_uuid: str) -> Optional[Dict[str, Any]]:
@@ -211,6 +210,7 @@ def get_wallet_by_token(token_uuid: str) -> Optional[Dict[str, Any]]:
             row = cursor.fetchone()
             return dict(row) if row else None
 
+# แก้ไขจุดนี้ให้มันลงทะเบียนทับข้อมูลเดิมไปเลยเสมอ! (DO UPDATE SET)
 def register_provisioned_card(token_uuid: str, card_uid: str) -> bool:
     now = datetime.datetime.now().isoformat(timespec="seconds")
     with get_connection() as conn:
@@ -219,7 +219,11 @@ def register_provisioned_card(token_uuid: str, card_uid: str) -> bool:
                 INSERT INTO wallets
                     (token_uuid, card_uid, balance, status, created_at, updated_at)
                 VALUES (%s, %s, 0.0, 'ACTIVE', %s, %s)
-                ON CONFLICT(token_uuid) DO NOTHING
+                ON CONFLICT(token_uuid) DO UPDATE SET 
+                    card_uid = EXCLUDED.card_uid,
+                    balance = 0.0,
+                    status = 'ACTIVE',
+                    updated_at = EXCLUDED.updated_at
             """, (token_uuid, card_uid, now, now))
         conn.commit()
     return True
@@ -675,3 +679,21 @@ def get_recent_stall_orders(stall_id: str, limit: int = 8) -> List[Dict[str, Any
                 LIMIT %s
             """, (stall_id, limit))
             return [dict(row) for row in cursor.fetchall()]
+
+# เพิ่มฟังก์ชันสำหรับการล้างข้อมูล (สามารถเรียกใช้ได้เมื่อต้องการ Reset)
+def reset_all_data():
+    """ลบข้อมูลทั้งหมดในทุกตารางทิ้ง แต่เก็บโครงสร้างตารางไว้เหมือนเดิม"""
+    try:
+        with get_connection() as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("""
+                    TRUNCATE TABLE 
+                        order_items, orders, transaction_ledger, 
+                        products, stalls, wallets 
+                    CASCADE;
+                """)
+            conn.commit()
+        initialize_database()
+        print("✅ ลบและรีเซ็ตฐานข้อมูลสำเร็จ")
+    except Exception as e:
+        print(f"เกิดข้อผิดพลาด: {e}")

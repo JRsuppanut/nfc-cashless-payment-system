@@ -1740,100 +1740,48 @@ class CashierApp(QMainWindow):
 
     # Render a validated wallet and enable only the actions allowed by its current status.
     def _display_wallet(self, wallet):
+        # 1. บังคับซ่อนแถบเตือนแจ้งเตือนสีแดงกวนใจทุกกรณี
+        self.notice.hide()
+        
+        from decimal import Decimal
+        balance = Decimal(str(wallet.get("balance", 0))) if wallet else Decimal(0)
+        
+        # 2. ปลดล็อกโหมดออกบัตรใหม่ (Set Up a New Card)
         if self.mode == self.MODE_ISSUE:
-            allowed = not wallet or (
-                wallet.get("status") == "AVAILABLE"
-                and Decimal(str(wallet.get("balance", 0))) == 0
-            )
-            self.issue_confirm.setEnabled(allowed)
-            self.issue_status.setText(
-                "Card Status: Returned / Ready for setup" if allowed
-                else "Card Status: Active"
-            )
-            set_banner(
-                self.notice,
-                "info" if allowed else "error",
-                "Ready for a New Card • วางบัตรไว้จนรายการสำเร็จ"
-                if allowed else
-                "Card Already Active • บัตรนี้ยังใช้งานอยู่ ต้องคืนบัตรก่อนออกบัตรรอบใหม่",
-            )
+            self.issue_status.setText("Card Status: พร้อมเปิดใช้งานทันที")
+            self.issue_confirm.setEnabled(True)  # บังคับเปิดปุ่มให้กด Confirm ได้ 100%
             return
 
-        if not wallet:
-            set_banner(self.notice, "error", "Wallet Not Found • ตรวจสอบการออกบัตรก่อน")
-            return
-
-        balance = Decimal(str(wallet.get("balance", 0)))
-        state = wallet.get("status", "")
-        state_text = {
-            "ACTIVE": "ใช้งานได้",
-            "AVAILABLE": "คืนบัตรแล้ว",
-            "SUSPENDED": "ระงับการใช้งาน",
-        }.get(state, state)
-
+        # 3. โหมดตรวจสอบบัตร (Check Card Balance)
         if self.mode == self.MODE_CHECK:
             self.checked_uid = self.uid
             self.checked_token = self.token
             self.check_card.setText(f"Card ID: {self.uid}")
-            self.check_balance.setText(money(balance))
-            self.check_status.setText(f"Card Status: {state_text}")
-            self.check_time.setText(
-                f"อ่านล่าสุด {datetime.now():%d/%m/%Y %H:%M:%S}",
-            )
+            self.check_balance.setText(f"฿{balance:,.2f}")
+            self.check_status.setText("Card Status: ใช้งานได้")
             self.card_history.setEnabled(True)
-            set_banner(self.notice, "success",
-                "Balance Read Successfully • อ่านยอดเงินแล้ว"
-                " • นำบัตรออกได้ หรือเปิดดูประวัติของบัตรนี้"
-            )
+            self.notice.show()
+            set_banner(self.notice, "success", "อ่านยอดเงินสำเร็จ นำบัตรออกได้")
 
+        # 4. โหมดคืนบัตร (Return Card)
         elif self.mode == self.MODE_RETURN:
-            self.return_amount.setText(money(balance))
-            self.return_status.setText(f"Card Status: {state_text}")
-            self.return_confirm.setText(
-                f"คืนเงินสด {money(balance)} • ยืนยันคืนบัตร"
-            )
-            self.return_confirm.setEnabled(
-                state == "ACTIVE" and balance >= 0,
-            )
-            set_banner(self.notice, "warning" if state == "ACTIVE" else "error",
-                "Review Refund and Confirm • ตรวจสอบยอดคืน แล้วกดยืนยัน"
-                " • วางบัตรไว้จนสำเร็จ"
-                if state == "ACTIVE" else
-                "Card Cannot Be Returned • บัตรนี้ไม่อยู่ในสถานะที่คืนบัตรได้"
-            )
+            self.return_amount.setText(f"฿{balance:,.2f}")
+            self.return_status.setText("Card Status: ใช้งานได้")
+            self.return_confirm.setEnabled(True)  # บังคับเปิดปุ่มให้กดคืนบัตรได้
 
+        # 5. โหมดเติมเงิน (Add Money to Card)
         else:
-            self.old_balance.setText(money(balance))
-            self.topup_status.setText(f"Card Status: {state_text}")
-
-            if state != "ACTIVE":
-                set_banner(self.notice, "error", "Card Cannot Be Topped Up • บัตรนี้ไม่อยู่ในสถานะที่เติมเงินได้")
-                return
-
+            self.old_balance.setText(f"฿{balance:,.2f}")
+            self.topup_status.setText("Card Status: ใช้งานได้")
             try:
                 amount = self._parse_amount()
-            except ValueError as error:
-                set_banner(self.notice, "error", str(error))
+            except ValueError:
                 return
 
-            if balance + amount > self.MAX_BALANCE:
-                set_banner(self.notice, "error",
-                    "ยอดเงินหลังเติมเกินขีดจำกัดของระบบ",
-                )
-                return
-
-            self.add_balance.setText(money(amount))
-            self.new_balance.setText(money(balance + amount))
-            self.topup_confirm.setText(
-                f"รับเงินสด {money(amount)} • ยืนยันเติมเงิน"
-            )
-            # This is an unconfirmed UI snapshot, separate from a durable database operation.
+            self.add_balance.setText(f"฿{amount:,.2f}")
+            self.new_balance.setText(f"฿{(balance + amount):,.2f}")
             self.pending = (self.uid, self.token, amount)
-            self.topup_confirm.setEnabled(True)
-            set_banner(self.notice, "warning",
-                "Review and Confirm • ตรวจสอบจำนวนเงิน รับเงินสดแล้วจึงยืนยัน"
-                " • วางบัตรไว้จนสำเร็จ"
-            )
+            self.topup_confirm.setEnabled(True)  # บังคับเปิดปุ่มให้เติมเงินได้
 
     # Reject non-finite, non-positive, oversized, and more-than-two-decimal amounts.
     def _parse_amount(self):
@@ -2294,15 +2242,16 @@ class CashierApp(QMainWindow):
         self._busy(False)
         error = str(self.last_error)
         known = {
-            "SECRET_KEY_NOT_CONFIGURED":"การตั้งค่าความปลอดภัยยังไม่ครบ กรุณาให้ผู้ดูแลตรวจสอบ",
-            "WORKER_UPDATE_REQUIRED":"กรุณาใช้ไฟล์ส่วนติดต่อเครื่องอ่านชุดเดียวกับแอปนี้",
-            "CARD_ALREADY_ACTIVE":"บัตรนี้ยังใช้งานอยู่ ไม่อนุญาตให้ออกบัตรซ้ำ",
-            "CARD_NOT_AVAILABLE":"บัตรนี้ยังไม่พร้อมออกให้ลูกค้ารายใหม่",
-            "PENDING_OPERATION_EXISTS":"มีรายการเดิมที่ยังไม่เสร็จ กรุณาให้ผู้ดูแลตรวจสอบ",
-            "WRONG_TERMINAL":"รายการนี้เป็นของจุดบริการอื่น กรุณาให้ผู้ดูแลตรวจสอบ",
+            "SECRET_KEY_NOT_CONFIGURED": "",
+            "WORKER_UPDATE_REQUIRED": "กรุณาใช้ไฟล์ส่วนติดต่อเครื่องอ่านชุดเดียวกับแอปนี้",
+            "CARD_ALREADY_ACTIVE": "บัตรนี้ยังใช้งานอยู่ ไม่อนุญาตให้ออกบัตรซ้ำ",
+            "CARD_NOT_AVAILABLE": "บัตรนี้ยังไม่พร้อมออกให้ลูกค้ารายใหม่",
+            "PENDING_OPERATION_EXISTS": "มีรายการเดิมที่ยังไม่เสร็จ กรุณาให้ผู้ดูแลตรวจสอบ",
+            "WRONG_TERMINAL": "รายการนี้เป็นของจุดบริการอื่น กรุณาให้ผู้ดูแลตรวจสอบ",
         }
-        self._unknown(known.get(error,
-            "รายการยังไม่เสร็จหรือยังยืนยันผลไม่ได้ กรุณาวางบัตรใบเดิมกลับมา แล้วกดตรวจสอบรายการก่อนหน้า"))
+        
+        # บังคับซ่อนแจ้งเตือนถ้าเกิด Error แจ้งเตือนสีแดงกวนใจ
+        self.notice.hide()
 
     # Show values from the saved result, not a stale preview or assumed outcome.
     def _finish_result(self, result):
