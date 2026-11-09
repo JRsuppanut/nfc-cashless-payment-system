@@ -1708,11 +1708,7 @@ class CashierApp(QMainWindow):
             self._details()
             if not self.valid:
                 # Unsigned legacy cards are only eligible for setup after checking their database state.
-                allowed_type = self.card_status in (
-                    "FOREIGN_OR_UNINITIALIZED_CARD",
-                    "LEGACY_UNSIGNED_CARD",
-                    "SIGNATURE_VERIFICATION_FAILED",
-                )
+                allowed_type = self.card_status in ("FOREIGN_OR_UNINITIALIZED_CARD", "LEGACY_UNSIGNED_CARD")
                 available = row is None or (row.get("status") == "AVAILABLE" and Decimal(str(row.get("balance",0))) == 0)
                 if mode == self.MODE_ISSUE and allowed_type and available:
                     self.issue_status.setText("Card Status: Ready for setup")
