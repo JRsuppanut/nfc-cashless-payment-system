@@ -8,6 +8,8 @@ import psycopg2
 from psycopg2.extras import DictCursor
 from typing import Any, Dict, List, Optional, Tuple
 
+import os
+
 # ==========================================
 # DATABASE CONFIGURATION
 # ==========================================
@@ -19,10 +21,70 @@ DB_CONFIG = {
     "port": "5432"
 }
 
+DB_CONFIG["dbname"] = os.getenv("FOODCOURT_DB_NAME", DB_CONFIG["dbname"])
+DB_CONFIG["host"] = os.getenv("FOODCOURT_DB_HOST", DB_CONFIG["host"])
+DB_CONFIG["password"] = os.getenv("FOODCOURT_DB_PASSWORD", DB_CONFIG["password"])
+
 def get_connection():
     """Establish a connection to the PostgreSQL database."""
     conn = psycopg2.connect(**DB_CONFIG)
     return conn
+
+def daily_sales(day: datetime.date, stall_id: Optional[str] = None) -> list[dict]:
+    """Return recorded food payments and refunds for a calendar day."""
+    params = {"day": day, "stall": stall_id}
+    conn = get_connection()
+    try:
+        with conn, conn.cursor(cursor_factory=DictCursor) as cursor:
+            cursor.execute("SET LOCAL statement_timeout = '5s'")
+            cursor.execute("SELECT to_regclass('stall_ui_events')")
+            current_events = ""
+            imported_guard = ""
+            if cursor.fetchone()[0] is not None:
+                # Count imported payments once and include refunds made in Stall POS.
+                imported_guard = """
+                    AND NOT EXISTS (
+                        SELECT 1 FROM stall_ui_events e
+                        WHERE e.order_id = 'legacy:' || o.order_id::text
+                          AND e.kind = 'PAY'
+                    )
+                """
+                current_events = """
+                    UNION ALL
+                    SELECT o.stall_id, e.kind, e.amount
+                    FROM stall_ui_events e
+                    JOIN stall_ui_orders o ON o.id = e.order_id
+                    WHERE e.created >= %(day)s::date
+                      AND e.created < %(day)s::date + 1
+                      AND e.kind IN ('PAY', 'REFUND_MEAL')
+                """
+            # The legacy orders table covers stalls that have yet to import history.
+            cursor.execute(f"""
+                WITH activity AS (
+                    SELECT o.stall_id, 'PAY' AS kind, o.total_amount AS amount
+                    FROM orders o
+                    WHERE o.payment_status = 'PAID'
+                      AND o.created_at >= %(day)s::date
+                      AND o.created_at < %(day)s::date + 1
+                      {imported_guard}
+                    {current_events}
+                )
+                SELECT s.stall_id, s.stall_name,
+                       COALESCE(SUM(a.amount) FILTER (WHERE a.kind = 'PAY'), 0) AS paid,
+                       COALESCE(SUM(a.amount) FILTER (WHERE a.kind = 'REFUND_MEAL'), 0) AS refunded
+                FROM stalls s
+                LEFT JOIN activity a ON a.stall_id = s.stall_id
+                WHERE %(stall)s::text IS NULL OR s.stall_id = %(stall)s
+                GROUP BY s.stall_id, s.stall_name
+                ORDER BY s.stall_id
+            """, params)
+            rows = [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+    for row in rows:
+        row["net"] = row["paid"] - row["refunded"]
+    return rows
 
 def initialize_database() -> None:
     """Create all required tables using PostgreSQL syntax."""
