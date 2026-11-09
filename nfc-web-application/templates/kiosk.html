@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ตรวจสอบยอดบัตร | ศูนย์อาหาร</title>
+
+  <!-- Scale the heading and balance for a tablet display. -->
+  <style>
+    body {
+      margin:0; min-height:100vh; display:grid; place-items:center;
+      background:#eef4ff; color:#152947; font:20px system-ui,sans-serif;
+    }
+    main {
+      width:min(90%,42rem); text-align:center; padding:2rem 0; background:white;
+      border-radius:1rem; box-shadow:0 8px 32px #15294720;
+    }
+    h1 { font-size:clamp(1.5rem,4vw,2.5rem); }
+    #balance { color:#146534; font-size:clamp(2.5rem,8vw,5rem); font-weight:bold; }
+    #status { min-height:2em; padding:0 1rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>ตรวจสอบยอดเงินในบัตร</h1>
+    <!-- Start with the amount hidden. Announce status changes through the live region. -->
+    <div id="balance" hidden></div>
+    <p id="status" role="status" aria-live="polite">กำลังเชื่อมต่อจอ…</p>
+  </main>
+
+  <script>
+    const statusLabel = document.getElementById("status");
+    const balanceLabel = document.getElementById("balance");
+    let clearTimer;
+
+    // Render the status and show the amount only when a balance was supplied.
+    function show(message, balance) {
+      statusLabel.textContent = message;
+      balanceLabel.hidden = balance === undefined;
+      balanceLabel.textContent = balance === undefined ? "" : "฿" + balance;
+    }
+
+    function connect() {
+      // Subscribe to scan results from the same FastAPI server that served this page.
+      const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+      const socket = new WebSocket(scheme + "//" + location.host + "/ws/kiosk");
+
+      socket.onopen = () => show("กรุณาแตะบัตรที่เครื่องอ่าน");
+
+      // Clear stale data and retry two seconds after a disconnect.
+      socket.onclose = () => {
+        clearTimeout(clearTimer);
+        show("การเชื่อมต่อขัดข้อง กำลังลองใหม่…");
+        setTimeout(connect, 2000);
+      };
+
+      // A new scan replaces the previous result and restarts the display timer.
+      socket.onmessage = ({data}) => {
+        const event = JSON.parse(data);
+        clearTimeout(clearTimer);
+
+        // Show the amount on success and a status message for the other outcomes.
+        if (event.status === "ok") {
+          show("ยอดเงินคงเหลือ", event.balance);
+        } else if (event.status === "inactive") {
+          show("บัตรนี้ยังใช้งานไม่ได้ กรุณาติดต่อจุดบริการ");
+        } else {
+          show("ตรวจยอดไม่ได้ชั่วคราว กรุณาลองใหม่");
+        }
+
+        // Hide the balance after eight seconds and return to the scan prompt.
+        clearTimer = setTimeout(() => show("กรุณาแตะบัตรที่เครื่องอ่าน"), 8000);
+      };
+    }
+
+    connect();
+  </script>
+</body>
+</html>
