@@ -1,30 +1,41 @@
+"""Token creation and HMAC verification for the food-court NFC system."""
+
+import os
 import hmac
 import hashlib
 import uuid
 from typing import Tuple, Optional
 
-# Secret key held exclusively by the payment system infrastructure
-# In production, load this securely from an environment variable or KMS
-SYSTEM_SECRET_KEY = b"KMUTNB_CPE_FOODCOURT_SECRET_2026"
-MAGIC_HEADER = b"FCTK"  # 4 bytes identifier
-TOKEN_PAYLOAD_PAGES = 9  # Pages 4 through 12 (36 bytes total)
+
+MAGIC_HEADER = b"FCTK"  # 4-byte identifier
+TOKEN_PAYLOAD_PAGES = 9  # Legacy binary payload: 36 bytes
+
+
+def _key() -> bytes:
+    """Load the shared secret key from the environment."""
+    secret_key = os.environ.get("FOODCOURT_SECRET_KEY", "").encode("utf-8")
+
+    # Never fall back to a hardcoded key when configuration is missing.
+    if len(secret_key) < 32:
+        raise RuntimeError("SECRET_KEY_NOT_CONFIGURED")
+
+    return secret_key
 
 
 class TokenSecurity:
     @staticmethod
     def generate_hmac(uid_bytes: bytes, token_uuid_bytes: bytes) -> bytes:
-        """
-        Compute a truncated 16-byte HMAC-SHA256 over the UID, magic header, and token UUID.
-        """
-        payload = uid_bytes + MAGIC_HEADER + token_uuid_bytes
-        full_hmac = hmac.new(SYSTEM_SECRET_KEY, payload, hashlib.sha256).digest()
+        """Compute a 16-byte truncated HMAC-SHA256 for the UID and token."""
+        payload = bytes(uid_bytes) + MAGIC_HEADER + bytes(token_uuid_bytes)
+        full_hmac = hmac.new(_key(), payload, hashlib.sha256).digest()
         return full_hmac[:16]
 
     @classmethod
     def create_token_payload(cls, uid_bytes: bytes) -> Tuple[bytes, str]:
-        """
-        Generate a serialized 36-byte token payload for NTAG21x provisioning.
-        Returns the raw 36 bytes and the string representation of the Token UUID.
+        """Create the original 36-byte binary payload.
+
+        Retained for compatibility. The latest NFC worker writes an NDEF URL
+        instead of writing this binary payload separately.
         """
         raw_uuid = uuid.uuid4().bytes
         signature = cls.generate_hmac(uid_bytes, raw_uuid)
@@ -32,13 +43,8 @@ class TokenSecurity:
         return payload, str(uuid.UUID(bytes=raw_uuid))
 
     @classmethod
-    def verify_token_payload(
-        cls, uid_bytes: bytes, payload_bytes: bytes
-    ) -> Tuple[bool, Optional[str], str]:
-        """
-        Verify the integrity and authenticity of the 36-byte payload read from the card.
-        Returns: (is_valid, token_uuid_str, status_message)
-        """
+    def verify_token_payload(cls, uid_bytes: bytes, payload_bytes: bytes) -> Tuple[bool, Optional[str], str]:
+        """Verify the original binary payload and return its token UUID."""
         if len(payload_bytes) != 36:
             return False, None, "INVALID_PAYLOAD_LENGTH"
 
@@ -51,9 +57,38 @@ class TokenSecurity:
 
         expected_signature = cls.generate_hmac(uid_bytes, token_uuid_bytes)
 
-        # Constant-time comparison to mitigate timing attacks
+        # Compare signatures without ordinary string or byte equality.
         if not hmac.compare_digest(received_signature, expected_signature):
             return False, None, "SIGNATURE_VERIFICATION_FAILED"
 
         token_uuid_str = str(uuid.UUID(bytes=token_uuid_bytes))
         return True, token_uuid_str, "TOKEN_VERIFIED"
+
+    @classmethod
+    def sign_url_token(cls, uid_bytes: bytes, token: str) -> str:
+        """Return the HMAC signature as 32 hexadecimal characters.
+
+        The NFC worker stores this signature in the URL's 's' parameter.
+        The secret key itself is never included in the URL.
+        """
+        token_uuid_bytes = uuid.UUID(str(token)).bytes
+        signature = cls.generate_hmac(uid_bytes, token_uuid_bytes)
+        return signature.hex()
+
+    @classmethod
+    def verify_url_token(cls, uid_bytes: bytes, token: str, signature: str) -> bool:
+        """Verify the URL signature against the physical UID and token."""
+        try:
+            received_signature = bytes.fromhex(signature)
+            token_uuid_bytes = uuid.UUID(str(token)).bytes
+            expected_signature = cls.generate_hmac(uid_bytes, token_uuid_bytes)
+
+            return len(received_signature) == 16 and hmac.compare_digest(received_signature, expected_signature)
+
+        except (ValueError, TypeError, AttributeError):
+            # Invalid UUIDs and malformed signatures are rejected.
+            return False
+
+        # A missing secret key raises RuntimeError intentionally.
+        # The caller must report a configuration error instead of accepting
+        # the card or silently using another key.
