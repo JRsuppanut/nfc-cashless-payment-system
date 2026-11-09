@@ -1566,7 +1566,7 @@ class CashierApp(QMainWindow):
             item.setText(f"Card ID: {uid}")
 
         if not self.valid or not token:
-            if self.card_status != "FOREIGN_OR_UNINITIALIZED_CARD":
+            if mode != self.MODE_ISSUE and self.card_status != "FOREIGN_OR_UNINITIALIZED_CARD":
                 self.issue_status.setText("Card Status: Verification Failed")
                 set_banner(self.notice, "error",
                     "Card Verification Failed • ไม่อนุญาตให้ทำรายการกับบัตรนี้"
@@ -1578,10 +1578,13 @@ class CashierApp(QMainWindow):
             def unregistered_done(latest):
                 if generation != self.epoch or not self._can_read():
                     return
-                if latest and latest.get("status") == "ACTIVE":
-                    self.issue_status.setText("Card Status: Active record found")
+                if latest and not (
+                    latest.get("status") == "AVAILABLE"
+                    and Decimal(str(latest.get("balance", 0))) == 0
+                ):
+                    self.issue_status.setText("Card Status: Existing record requires review")
                     set_banner(self.notice, "error",
-                        "Card Data Cannot Be Verified • พบรายการที่ยังใช้งานอยู่ใน Database "
+                        "Card Cannot Be Re-Issued • พบข้อมูลบัตรเดิมที่ไม่พร้อมลงทะเบียน "
                         "กรุณาให้ผู้ดูแลตรวจสอบ ห้ามออกบัตรซ้ำ"
                     )
                     return
