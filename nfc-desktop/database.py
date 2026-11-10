@@ -17,7 +17,7 @@ DB_CONFIG = {
     "dbname": "foodcourt_db",
     "user": "postgres",
     "password": "////",  # IMPORTANT: Change this to your PostgreSQL password
-    "host": "10.137.155.226",
+    "host": "127.0.0.1",
     "port": "5432"
 }
 
