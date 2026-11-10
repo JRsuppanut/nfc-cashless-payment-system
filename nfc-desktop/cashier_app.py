@@ -448,11 +448,13 @@ class CashierStore:
                     c.execute("SELECT 1 FROM wallets WHERE card_uid=%s AND status='ACTIVE' LIMIT 1", (uid,))
                     if c.fetchone():
                         raise CashierError("CARD_ALREADY_ACTIVE")
-                    c.execute("""SELECT balance,status FROM wallets WHERE card_uid=%s
+                    c.execute("""SELECT token_uuid,balance,status FROM wallets WHERE card_uid=%s
                         ORDER BY created_at DESC,updated_at DESC LIMIT 1 FOR UPDATE""", (uid,))
                     old = c.fetchone()
                     if old and (old["status"] != "AVAILABLE" or Decimal(str(old["balance"])) != 0):
                         raise CashierError("CARD_NOT_AVAILABLE")
+                    if old and previous_token is not None and old["token_uuid"] != previous_token:
+                        raise CashierError("ISSUE_CARD_CHANGED")
                 c.execute("""INSERT INTO cashier_ui_operations
                     (operation_id,kind,token_uuid,card_uid,amount,terminal_id,previous_token,stage)
                     VALUES(%s,%s,%s,%s,%s,%s,%s,'PREPARED') RETURNING *""",
@@ -1680,6 +1682,14 @@ class CashierApp(QMainWindow):
             set_banner(self.notice, "success", "Card Read Successfully • นำบัตรออกแล้ว ยอดที่แสดงเป็นยอดเมื่ออ่านล่าสุด")
 
 
+    @staticmethod
+    def _matches_returned_wallet(wallet, token):
+        # An old-server link must match the last returned cycle of this card.
+        return bool(
+            wallet and token and wallet["token_uuid"] == token
+            and wallet["status"] == "AVAILABLE" and wallet["balance"] == 0
+        )
+
     # Perform a fresh physical read and database lookup before enabling a mode action.
     def _reload_card(self):
         self._disable_actions()
@@ -1707,16 +1717,33 @@ class CashierApp(QMainWindow):
                 item.setText(f"Card ID: {uid}")
             self._details()
             if not self.valid:
-                # Unsigned legacy cards are only eligible for setup after checking their database state.
-                allowed_type = self.card_status in ("FOREIGN_OR_UNINITIALIZED_CARD", "LEGACY_UNSIGNED_CARD")
-                available = row is None or (row.get("status") == "AVAILABLE" and Decimal(str(row.get("balance",0))) == 0)
-                if mode == self.MODE_ISSUE and allowed_type and available:
+                status = self.card_status
+                available = row is None or (row["status"] == "AVAILABLE" and row["balance"] == 0)
+                can_setup = (
+                    status in ("FOREIGN_OR_UNINITIALIZED_CARD", "LEGACY_UNSIGNED_CARD") and available
+                ) or (
+                    status == "SIGNED_WALLET_OTHER_SERVER"
+                    and self._matches_returned_wallet(row, self.token)
+                )
+
+                if mode == self.MODE_ISSUE and can_setup:
                     self.issue_status.setText("Card Status: Ready for setup")
                     self.issue_confirm.setEnabled(True)
                     set_banner(self.notice, "warning", "Ready for Setup • ตรวจสอบบัตรแล้ว กดยืนยันเพื่อออกบัตร")
-                else:
+                    return
+
+                messages = {
+                    "SIGNED_WALLET_OTHER_SERVER": "บัตรยังใช้ลิงก์เซิร์ฟเวอร์เดิม กรุณาให้ผู้ดูแลตรวจสอบ",
+                    "FOREIGN_URL": "ลิงก์บนบัตรไม่ตรงกับระบบนี้ กรุณาให้ผู้ดูแลตรวจสอบ",
+                    "SIGNATURE_VERIFICATION_FAILED": "ตรวจสอบลายเซ็นบัตรไม่ผ่าน กรุณาให้ผู้ดูแลตรวจสอบ",
+                    "SECRET_KEY_NOT_CONFIGURED": "ยังไม่ได้ตั้งค่า Secret Key สำหรับตรวจสอบบัตร",
+                }
+                if mode == self.MODE_ISSUE:
                     self.issue_status.setText("Card Status: Cannot Use")
-                    set_banner(self.notice, "error", "บัตรนี้ยังใช้ทำรายการไม่ได้ กรุณาให้ผู้ดูแลตรวจสอบ")
+                message = messages.get(status, "บัตรนี้ยังใช้ทำรายการไม่ได้ กรุณาให้ผู้ดูแลตรวจสอบ")
+                if mode == self.MODE_ISSUE and row and row["status"] == "ACTIVE":
+                    message = "บัตรนี้ยังใช้งานอยู่ ต้องคืนบัตรให้สำเร็จก่อนออกบัตรรอบใหม่"
+                set_banner(self.notice, "error", message)
                 return
             if not row or row.get("card_uid") != uid:
                 set_banner(self.notice, "error", "ไม่พบข้อมูลที่ตรงกับบัตร กรุณาให้ผู้ดูแลตรวจสอบ")
@@ -1959,6 +1986,10 @@ class CashierApp(QMainWindow):
             "WALLET_NOT_FOUND":"ไม่พบข้อมูลบัตร กรุณาให้ผู้ดูแลตรวจสอบ",
             "CARD_ID_MISMATCH":"บัตรไม่ตรงกับข้อมูลรายการ",
             "CARD_NOT_ACTIVE":"บัตรนี้คืนแล้วหรือไม่พร้อมใช้งาน",
+            "CARD_ALREADY_ACTIVE": "บัตรนี้ยังใช้งานอยู่ ต้องคืนบัตรให้สำเร็จก่อนออกบัตรรอบใหม่",
+            "CARD_NOT_AVAILABLE": "บัตรนี้ยังไม่พร้อมออกใหม่ กรุณาให้ผู้ดูแลตรวจสอบ",
+            "PENDING_OPERATION_EXISTS": "มีรายการเดิมค้างอยู่ กรุณากลับไปตรวจรายการเดิมที่จุดบริการที่เริ่มรายการ",
+            "ISSUE_CARD_CHANGED": "ข้อมูลบัตรเปลี่ยนไป กรุณานำบัตรออกแล้วแตะใหม่เพื่อตรวจสอบ",
             "BALANCE_LIMIT":"ยอดเงินหลังเติมเกินขีดจำกัด",
             "INVALID_AMOUNT":"จำนวนเงินไม่ถูกต้อง",
             "INVALID_BALANCE":"ข้อมูลยอดเงินผิดปกติ กรุณาให้ผู้ดูแลตรวจสอบ",
@@ -2160,9 +2191,9 @@ class CashierApp(QMainWindow):
             if generation == self.history_epoch:
                 self.history_refresh.setEnabled(True)
                 self.history_message.setText(
-                    "โหลดประวัติไม่ได้"
-                    " • ตรวจสอบฐานข้อมูลแล้วกดรีเฟรช"
+                    "โหลดประวัติไม่ได้ • เปิดรายละเอียดทางเทคนิคเพื่อดูข้อผิดพลาด"
                 )
+                self._details()
 
         self._job(
             lambda: self.store.history(self.HISTORY_LIMIT, token),
@@ -2255,12 +2286,31 @@ class CashierApp(QMainWindow):
             if not op:
                 self.worker.check_configuration()
                 if request["kind"] == "ISSUE":
-                    self.worker.read_current_card(uid)
+                    _, valid, old_token, status = self.worker.read_current_card(uid)
+                    if old_token != request.get("previous_token"):
+                        return {"success": False, "reason": "ISSUE_CARD_CHANGED"}
+                    if status == "SIGNED_WALLET_OTHER_SERVER":
+                        wallet = self.store.latest_wallet(uid)
+                        if not self._matches_returned_wallet(wallet, old_token):
+                            return {"success": False, "reason": "CARD_NOT_AVAILABLE"}
+                    elif not valid and status not in ("FOREIGN_OR_UNINITIALIZED_CARD", "LEGACY_UNSIGNED_CARD"):
+                        return {"success": False, "reason": "ISSUE_CARD_CHANGED"}
                 else:
-                    self.worker.verify_current_card(uid,request["token_uuid"])
-                # Commit the planned request separately before any card write or balance update.
-                op = self.store.prepare(operation_id,request["kind"],uid,request["token_uuid"],
-                                        request.get("amount"),request.get("previous_token"))
+                    self.worker.verify_current_card(uid, request["token_uuid"])
+
+                # Commit the request before writing the card or changing a balance.
+                # An explicit business rejection means there is no new request to recover.
+                try:
+                    op = self.store.prepare(
+                        operation_id, request["kind"], uid, request["token_uuid"],
+                        request.get("amount"), request.get("previous_token"),
+                    )
+                except CashierError as exc:
+                    reason = str(exc)
+                    if reason in ("CARD_ALREADY_ACTIVE", "CARD_NOT_AVAILABLE",
+                                  "PENDING_OPERATION_EXISTS", "ISSUE_CARD_CHANGED"):
+                        return {"success": False, "reason": reason}
+                    raise
             if op["terminal_id"] != self.terminal_id:
                 raise CashierError("WRONG_TERMINAL")
             if op["kind"] == "ISSUE":

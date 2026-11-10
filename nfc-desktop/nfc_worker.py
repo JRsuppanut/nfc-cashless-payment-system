@@ -197,25 +197,26 @@ class NFCWorker(threading.Thread):
                 parts = urlsplit(url)
                 base = urlsplit(BASE_URL)
 
-                # Reject links belonging to a different server or page.
-                if parts.scheme != base.scheme or parts.netloc != base.netloc or parts.path != base.path + "/wallet":
+                # Accept only wallet links, then verify the signature even if the host changed.
+                if parts.scheme not in ("http", "https") or not parts.netloc or parts.path != base.path + "/wallet":
                     return False, None, "FOREIGN_URL"
+                same_server = (parts.scheme, parts.netloc) == (base.scheme, base.netloc)
 
                 values = parse_qs(parts.query, keep_blank_values=True)
-
                 if len(values.get("t", [])) != 1:
                     raise ValueError
-
                 token = str(uuid.UUID(values["t"][0]))
 
-                # Report legacy cards separately; do not treat them as verified.
                 if "s" not in values:
+                    if not same_server:
+                        return False, None, "FOREIGN_URL"
                     return False, token, "LEGACY_UNSIGNED_CARD"
 
-                # The signature is bound to both the physical UID and the token.
                 if len(values["s"]) != 1 or not TokenSecurity.verify_url_token(raw_uid, token, values["s"][0]):
                     return False, token, "SIGNATURE_VERIFICATION_FAILED"
 
+                if not same_server:
+                    return False, token, "SIGNED_WALLET_OTHER_SERVER"
                 return True, token, "TOKEN_VERIFIED"
 
             return False, None, "FOREIGN_OR_UNINITIALIZED_CARD"
