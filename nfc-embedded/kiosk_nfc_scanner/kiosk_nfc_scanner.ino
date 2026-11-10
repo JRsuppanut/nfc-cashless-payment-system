@@ -4,11 +4,11 @@
 #include <ArduinoJson.h>
 
 // Network Configuration
-const char* WIFI_SSID = "JRnakrab";
-const char* WIFI_PASSWORD = "password";
+const char* WIFI_SSID = "POSIRI 5G";
+const char* WIFI_PASSWORD = "0613250226";
 
 // API Configuration
-const char* SERVER_URL = "http://10.137.155.226:8000/api/kiosk/scan";
+const char* SERVER_URL = "http://192.168.1.59:8000/api/kiosk/scan";
 
 // UART Configuration for PN532
 #define PN532_RX_PIN 4

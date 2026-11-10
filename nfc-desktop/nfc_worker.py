@@ -11,7 +11,7 @@ from adafruit_pn532.uart import PN532_UART
 DEFAULT_PORT = "COM4"
 START_PAGE = 4
 TOTAL_PAGES = 26
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = "http://192.168.1.59:8000"
 
 class NFCWorker(threading.Thread):
     def __init__(

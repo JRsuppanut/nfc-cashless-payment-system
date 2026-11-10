@@ -12,6 +12,7 @@ import uuid
 from decimal import Decimal, InvalidOperation
 from contextlib import contextmanager
 
+
 import database
 from psycopg2.extras import RealDictCursor, Json
 from nfc_worker import NFCWorker, DEFAULT_PORT
